@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>ERD harness</title>
+<link rel="stylesheet" href="../../dist/webview.css" />
+<script>
+  // Stand-in for the VS Code webview API: answers "ready" with the load message, records the rest.
+  window.__posted = [];
+  window.acquireVsCodeApi = () => ({
+    postMessage(m) {
+      window.__posted.push(m);
+      if (m.type === 'ready') setTimeout(() => window.postMessage(window.__ERD_LOAD__, '*'), 0);
+      else console.log('[host]', m.type, m);
+    },
+  });
+</script>
+<script src="data.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script src="../../dist/webview.js"></script>
+</body>
+</html>

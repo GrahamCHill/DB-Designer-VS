@@ -3,7 +3,7 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Module = require('module');
 const [, , provider = 'ollama', model = 'qwen2.5-coder:3b'] = process.argv;
-const settings: Record<string, string> = { provider, ollamaModel: model, anthropicModel: model, vscodeModel: '' };
+const settings: Record<string, string> = { provider, ollamaModel: model, anthropicModel: model, vscodeModel: '', openaiModel: model, openaiBaseUrl: process.argv[4] ?? 'http://localhost:11434/v1' };
 class CancellationError extends Error {}
 const stub = {
   workspace: { getConfiguration: () => ({ get: (k: string) => settings[k], update: async () => undefined }) },
@@ -36,7 +36,8 @@ async function main() {
   const t0 = Date.now();
   const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
   const out = { appendLine: (s: string) => console.log(s) };
-  const review = await runReview({ schema }, {} as never, token as never, out as never);
+  const secrets = { get: async () => undefined, store: async () => undefined };
+  const review = await runReview({ schema }, secrets as never, token as never, out as never);
   console.log(`\n${review.model} in ${((Date.now() - t0) / 1000).toFixed(1)}s\nSUMMARY: ${review.summary}\n`);
   const working = cloneSchema(schema);
   for (const s of review.suggestions) {

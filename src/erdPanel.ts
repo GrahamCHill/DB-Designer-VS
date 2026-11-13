@@ -1,25 +1,30 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ErdFile, HostToWebview, Layout, Schema, WebviewToHost } from './shared/model';
-import { generateDiffSql, generateFullSql } from './shared/pgExport';
+import { DiagramGroup, ErdFile, HostToWebview, Layout, Schema, WebviewToHost } from './shared/model';
+import { generateDiffSql } from './shared/pgExport';
+import { EXPORT_DIALECTS, ExportDialect, generateSchemaSql } from './shared/sqlExport';
+import { Verification, VerifyInput, validationHeader, verifyExport } from './verify/index';
 import { SchemaOp } from './shared/ops';
-import { LoadedSource, Source, loadSource, sourceKey, sourceTitle } from './sources';
+import { LoadedSource, Source, addRecent, loadSource, sourceKey, sourceTitle } from './sources';
 import { chooseProvider, currentProvider, providerLabel, runReview } from './ai/providers';
 import { buildStandaloneHtml } from './standalone';
 
 interface SavedState {
   layout: Layout;
+  groups?: DiagramGroup[];
   working?: Schema;
   dirty?: boolean;
 }
 
-const STATE_PREFIX = 'erdViewer.state:';
+const STATE_PREFIX = 'dbDesigner.state:';
 
 export class ErdPanel {
   private static panels = new Map<string, ErdPanel>();
   private static all = new Set<ErdPanel>();
   private static lastActive?: ErdPanel;
+  /** Fires when panels open, close, load or change dirty state (drives the sidebar). */
+  static readonly changed = new vscode.EventEmitter<void>();
 
   /** The ERD panel the user is looking at (or used most recently). */
   static active(): ErdPanel | undefined {
@@ -38,7 +43,7 @@ export class ErdPanel {
       existing.panel.reveal();
       return;
     }
-    const panel = vscode.window.createWebviewPanel('erdViewer', `ERD: ${sourceTitle(source)}`, vscode.ViewColumn.Active, ErdPanel.webviewOptions(context));
+    const panel = vscode.window.createWebviewPanel('dbDesigner', `ERD: ${sourceTitle(source)}`, vscode.ViewColumn.Active, ErdPanel.webviewOptions(context));
     ErdPanel.panels.set(key, new ErdPanel(context, output, source, key, panel));
   }
 
@@ -63,6 +68,18 @@ export class ErdPanel {
   private aiCancel?: vscode.CancellationTokenSource;
   private pendingOps = new Map<string, (errors: string[]) => void>();
 
+  get sourceRef(): Source {
+    return this.source;
+  }
+
+  get isDirty(): boolean {
+    return this.dirty;
+  }
+
+  get label(): string | undefined {
+    return this.loaded?.label;
+  }
+
   private constructor(
     private context: vscode.ExtensionContext,
     private output: vscode.OutputChannel,
@@ -80,6 +97,7 @@ export class ErdPanel {
     this.dirty = !!saved?.dirty;
     void this.load(false);
     this.watchSources();
+    ErdPanel.changed.fire();
   }
 
   get title(): string {
@@ -115,7 +133,7 @@ export class ErdPanel {
       );
     } catch (e) {
       const msg = (e as Error).message ?? String(e);
-      vscode.window.showErrorMessage(`ERD Viewer: ${msg}`);
+      vscode.window.showErrorMessage(`DB Designer: ${msg}`);
       this.output.appendLine(`[error] ${sourceTitle(this.source)}: ${msg}`);
       if (!this.loaded) this.panel.dispose();
       return;
@@ -128,9 +146,10 @@ export class ErdPanel {
       this.output.appendLine(`${this.loaded.warnings.length} parser warning(s):`);
       for (const w of this.loaded.warnings) this.output.appendLine(`  ⚠ ${w}`);
     }
+    void addRecent(this.context, this.source, this.loaded.title).then(() => ErdPanel.changed.fire());
     if (discardDraft) {
       const s = this.savedState();
-      await this.saveState({ layout: s?.layout ?? {} });
+      await this.saveState({ layout: s?.layout ?? {}, groups: s?.groups });
       this.dirty = false;
     }
     this.post();
@@ -160,6 +179,7 @@ export class ErdPanel {
       mode: 'extension',
       canSaveFile: this.source.kind === 'erd',
       hiddenSchemas: this.loaded.hiddenSchemas,
+      groups: saved?.groups ?? this.loaded.groups,
       aiProvider: providerLabel(currentProvider()),
     });
   }
@@ -227,7 +247,7 @@ export class ErdPanel {
     const cts = (this.aiCancel = new vscode.CancellationTokenSource());
     try {
       const review = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `ERD Viewer: AI normalisation review (${providerLabel(currentProvider())})…`, cancellable: true },
+        { location: vscode.ProgressLocation.Notification, title: `DB Designer: AI normalisation review (${providerLabel(currentProvider())})…`, cancellable: true },
         (_p, token) => {
           token.onCancellationRequested(() => cts.cancel());
           return runReview(request, this.context.secrets, cts.token, this.output);
@@ -253,10 +273,11 @@ export class ErdPanel {
         this.post();
         return;
       case 'saveState':
+        if (this.dirty !== m.dirty) setTimeout(() => ErdPanel.changed.fire(), 0);
         this.dirty = m.dirty;
         this.working = m.working;
         this.layout = m.layout;
-        await this.saveState({ layout: m.layout, working: m.dirty ? m.working : undefined, dirty: m.dirty });
+        await this.saveState({ layout: m.layout, working: m.dirty ? m.working : undefined, dirty: m.dirty, groups: m.groups });
         return;
       case 'reload': {
         if (this.dirty) {
@@ -274,13 +295,15 @@ export class ErdPanel {
         const ok = await vscode.window.showWarningMessage('Discard all edits made in the diagram?', { modal: true }, 'Discard');
         if (ok !== 'Discard') return;
         const s = this.savedState();
-        await this.saveState({ layout: s?.layout ?? {} });
+        await this.saveState({ layout: s?.layout ?? {}, groups: s?.groups });
         this.dirty = false;
         this.post();
         return;
       }
+      case 'validate':
+        return this.validateAll(m.schema, m.schemas);
       case 'export':
-        return this.exportSql(m.mode, m.schema, m.baseline, m.schemas);
+        return this.exportSql(m.mode, m.schema, m.baseline, m.schemas, m.target);
       case 'saveImage':
         return this.saveImage(m.format, m.dataUrl);
       case 'share':
@@ -293,7 +316,7 @@ export class ErdPanel {
         this.aiCancel?.cancel();
         return;
       case 'aiChooseProvider': {
-        const p = await chooseProvider();
+        const p = await chooseProvider(this.context.secrets);
         if (p) this.send({ type: 'aiProvider', label: providerLabel(p) });
         return;
       }
@@ -330,18 +353,74 @@ export class ErdPanel {
     return vscode.window.showSaveDialog({ title, defaultUri: dir ? vscode.Uri.joinPath(dir, fileName) : undefined, filters, saveLabel: 'Export' });
   }
 
-  private async exportSql(mode: 'full' | 'diff', schema: Schema, baseline: Schema, schemas?: string[]) {
-    const sql = mode === 'full' ? generateFullSql(schema, { schemas, sourceLabel: this.loaded?.label }) : generateDiffSql(baseline, schema);
+  private async exportSql(mode: 'full' | 'diff', schema: Schema, baseline: Schema, schemas?: string[], dialect: ExportDialect = 'postgres') {
+    const d = EXPORT_DIALECTS.find((x) => x.id === dialect) ?? EXPORT_DIALECTS[0];
+    let sql = mode === 'full' ? generateSchemaSql(schema, d.id, { schemas, sourceLabel: this.loaded?.label }) : generateDiffSql(baseline, schema);
+    const v = await this.verify({ schema, baseline, target: mode === 'full' ? d.id : 'postgres', mode, sql, schemas });
+    if (!v.ok) {
+      const choice = await vscode.window.showWarningMessage(
+        `The generated ${mode === 'full' ? d.label : 'PostgreSQL migration'} SQL has ${v.errors.length} problem(s). ${v.summary}`,
+        { modal: true, detail: v.errors.slice(0, 6).join('\n\n') + (v.errors.length > 6 ? `\n\n…and ${v.errors.length - 6} more (see the DB Designer output).` : '') },
+        'Show Problems',
+        'Save Anyway',
+      );
+      if (choice !== 'Save Anyway') {
+        if (choice === 'Show Problems') this.showProblems(v);
+        this.send({ type: 'validated', results: [v] });
+        return;
+      }
+    }
+    sql = sql.replace(/^((?:--[^\n]*\n)+)/, (head) => `${head}${validationHeader(v)}\n`);
     const target = await this.pickTarget(
-      mode === 'full' ? 'Export PostgreSQL schema' : 'Export PostgreSQL migration (changes only)',
-      `${this.safeName()}.${mode === 'full' ? 'schema' : 'migration'}.sql`,
+      mode === 'full' ? `Export ${d.label} schema` : 'Export PostgreSQL migration (changes only)',
+      `${this.safeName()}.${mode === 'full' ? `${d.ext === 'pg' ? 'schema' : `${d.ext}.schema`}` : 'migration'}.sql`,
       { SQL: ['sql'] },
     );
     if (!target) return;
     await vscode.workspace.fs.writeFile(target, Buffer.from(sql, 'utf8'));
     const doc = await vscode.workspace.openTextDocument(target);
     await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
-    this.send({ type: 'exported', path: target.fsPath });
+    this.send({ type: 'exported', path: target.fsPath, note: v.ok ? `Validated: ${v.summary}` : 'Saved with validation problems' });
+  }
+
+  private pgliteDir(): string {
+    return vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'pglite').fsPath;
+  }
+
+  private async verify(input: Omit<VerifyInput, 'pgliteDir'>): Promise<Verification> {
+    return vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Validating ${input.mode === 'diff' ? 'migration' : input.target} SQL…` },
+      async () => {
+        try {
+          return await verifyExport({ ...input, pgliteDir: this.pgliteDir() });
+        } catch (e) {
+          this.output.appendLine(`[validate] ${(e as Error).stack ?? e}`);
+          return { dialect: input.target, ok: false, summary: 'The validator itself failed.', errors: [(e as Error).message], warnings: [] };
+        }
+      },
+    );
+  }
+
+  private showProblems(...results: Verification[]) {
+    this.output.appendLine(`\n[${new Date().toLocaleTimeString()}] SQL validation for "${this.title}"`);
+    for (const v of results) {
+      const label = EXPORT_DIALECTS.find((d) => d.id === v.dialect)?.label ?? v.dialect;
+      this.output.appendLine(`  ${v.ok ? '✔' : '✖'} ${label}: ${v.summary}`);
+      for (const e of v.errors) this.output.appendLine(`      error: ${e}`);
+      for (const w of v.warnings) this.output.appendLine(`      note:  ${w}`);
+    }
+    this.output.show(true);
+  }
+
+  /** Validate the current diagram against every export dialect (toolbar "Validate SQL"). */
+  private async validateAll(schema: Schema, schemas?: string[]) {
+    const results: Verification[] = [];
+    for (const d of EXPORT_DIALECTS) {
+      const sql = generateSchemaSql(schema, d.id, { schemas });
+      results.push(await this.verify({ schema, target: d.id, mode: 'full', sql, schemas }));
+    }
+    this.send({ type: 'validated', results });
+    if (results.some((r) => !r.ok || r.warnings.length)) this.showProblems(...results);
   }
 
   private async saveImage(format: 'png' | 'svg', dataUrl: string) {
@@ -369,7 +448,7 @@ export class ErdPanel {
       await vscode.workspace.fs.writeFile(target, Buffer.from(JSON.stringify(file, null, 2), 'utf8'));
       this.send({ type: 'exported', path: target.fsPath });
       vscode.window.showInformationMessage(
-        `Saved ${path.basename(target.fsPath)}. Anyone with ERD Viewer can open it (double-click in VS Code) and keep editing.`,
+        `Saved ${path.basename(target.fsPath)}. Anyone with DB Designer can open it (double-click in VS Code) and keep editing.`,
       );
       return;
     }
@@ -395,7 +474,7 @@ export class ErdPanel {
     this.savingFile = true;
     try {
       await fs.writeFile(this.source.path, JSON.stringify(file, null, 2), 'utf8');
-      await this.saveState({ layout: file.layout });
+      await this.saveState({ layout: file.layout, groups: file.groups });
       this.dirty = false;
       await this.load(false);
       this.send({ type: 'saved' });
@@ -434,5 +513,6 @@ export class ErdPanel {
     if (ErdPanel.lastActive === this) ErdPanel.lastActive = undefined;
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
+    ErdPanel.changed.fire();
   }
 }

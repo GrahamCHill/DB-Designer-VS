@@ -1,0 +1,21 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import { parseSql } from '../src/shared/sqlParser';
+import { generateFullSql, generateDiffSql } from '../src/shared/pgExport';
+import { cloneSchema } from '../src/shared/model';
+import { verifyPostgres } from '../src/verify/postgres';
+const dir = '../MPUDOH-ContractManagementTool/db';
+const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).map((f) => ({ name: f, content: fs.readFileSync(path.join(dir, f), 'utf8') }));
+const s = parseSql(files).schema;
+const assets = path.resolve('node_modules/@electric-sql/pglite/dist');
+(async () => {
+  let t = Date.now();
+  console.log('full:', JSON.stringify(await verifyPostgres(generateFullSql(s), assets)), Date.now() - t, 'ms');
+  const bad = generateFullSql(s).replace('CREATE TABLE app.users (', 'CREATE TABLE app.users (\n    oops nosuchtype,');
+  t = Date.now();
+  console.log('broken:', JSON.stringify(await verifyPostgres(bad, assets)).slice(0, 300), Date.now() - t, 'ms');
+  const e = cloneSchema(s);
+  e.tables[0].columns.push({ id: 'x', name: 'nickname', type: 'text', nullable: true, pk: false, unique: true });
+  t = Date.now();
+  console.log('migration:', JSON.stringify(await verifyPostgres(generateDiffSql(s, e), assets, generateFullSql(s))), Date.now() - t, 'ms');
+})();

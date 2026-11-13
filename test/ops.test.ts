@@ -126,7 +126,7 @@ test('standalone HTML embeds data safely', () => {
   const s = base();
   s.tables[0].comment = 'evil </script><script>alert(1)</script>   line';
   const html = buildStandaloneHtml(
-    { format: 'erd-viewer', version: 1, title: 'A <b>title</b>', savedAt: new Date().toISOString(), schema: s, layout: {} },
+    { format: 'db-designer-vs', version: 1, title: 'A <b>title</b>', savedAt: new Date().toISOString(), schema: s, layout: {} },
     'console.log("</script>")',
     'body{}',
   );

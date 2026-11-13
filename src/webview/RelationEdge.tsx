@@ -1,6 +1,20 @@
-import React, { memo, useContext } from 'react';
+import React, { memo, useContext, useMemo } from 'react';
 import { BaseEdge, Edge, EdgeLabelRenderer, EdgeProps, Position, getSmoothStepPath } from '@xyflow/react';
 import { CloseIcon } from './icons';
+import { Pt, Rect, midpoint, roundedPath, routeOrthogonal } from './router';
+
+/** Table rectangles the lines should avoid; `version` changes whenever they move. */
+export const RouterContext = React.createContext<{ rects: Rect[]; version: number; enabled: boolean }>({ rects: [], version: 0, enabled: false });
+
+// Routes are cached per edge, endpoints and obstacle version so re-renders (hover, selection) are free.
+const routeCache = new Map<string, Pt[] | null>();
+function cachedRoute(key: string, compute: () => Pt[] | null): Pt[] | null {
+  if (routeCache.has(key)) return routeCache.get(key)!;
+  if (routeCache.size > 5000) routeCache.clear();
+  const r = compute();
+  routeCache.set(key, r);
+  return r;
+}
 
 export interface RelationEdgeData extends Record<string, unknown> {
   /** e.g. "contracts.pdf_file_id → files.id" */
@@ -13,6 +27,8 @@ export interface RelationEdgeData extends Record<string, unknown> {
   /** Show the detail label (edge hovered). */
   hovered?: boolean;
   dimmed: boolean;
+  /** One of its tables is being dragged: draw a simple line until the drag ends. */
+  moving?: boolean;
 }
 
 export type RelationEdgeType = Edge<RelationEdgeData, 'relation'>;
@@ -38,7 +54,22 @@ function offset(x: number, y: number, pos: Position, d: number): [number, number
  */
 function RelationEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected }: EdgeProps<RelationEdgeType>) {
   const actions = useContext(EdgeActionsContext);
-  const [path, labelX, labelY] = getSmoothStepPath({
+  const router = useContext(RouterContext);
+  const useRoute = router.enabled && !data?.moving && (sourcePosition === Position.Left || sourcePosition === Position.Right);
+  const route = useMemo(() => {
+    if (!useRoute) return null;
+    const key = `${id}|${router.version}|${Math.round(sourceX)},${Math.round(sourceY)},${Math.round(targetX)},${Math.round(targetY)}|${sourcePosition}${targetPosition}`;
+    return cachedRoute(key, () =>
+      routeOrthogonal(
+        { x: Math.round(sourceX), y: Math.round(sourceY) },
+        sourcePosition === Position.Right ? 'R' : 'L',
+        { x: Math.round(targetX), y: Math.round(targetY) },
+        targetPosition === Position.Right ? 'R' : 'L',
+        router.rects,
+      ),
+    );
+  }, [useRoute, id, router.version, router.rects, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition]);
+  const [stepPath, stepX, stepY] = getSmoothStepPath({
     sourceX,
     sourceY,
     targetX,
@@ -48,6 +79,10 @@ function RelationEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePositi
     borderRadius: 10,
     offset: 28,
   });
+  const mid = route ? midpoint(route) : undefined;
+  const path = route ? roundedPath(route) : stepPath;
+  const labelX = mid?.x ?? stepX;
+  const labelY = mid?.y ?? stepY;
   const active = selected || data?.highlighted;
   const state = active ? 'active' : data?.dimmed ? 'dimmed' : '';
   const [px, py] = offset(sourceX, sourceY, sourcePosition, 24);

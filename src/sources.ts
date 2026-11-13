@@ -20,6 +20,7 @@ export interface LoadedSource {
   /** Layout stored in an .erd.json file. */
   layout?: Layout;
   hiddenSchemas?: string[];
+  groups?: import('./shared/model').DiagramGroup[];
 }
 
 export function sourceKey(s: Source): string {
@@ -72,7 +73,7 @@ async function walk(dir: string, exclude: Set<string>, out: string[]) {
 }
 
 export async function collectSqlFiles(paths: string[]): Promise<string[]> {
-  const exclude = new Set(vscode.workspace.getConfiguration('erdViewer').get<string[]>('excludeFolders') ?? []);
+  const exclude = new Set(vscode.workspace.getConfiguration('dbDesigner').get<string[]>('excludeFolders') ?? []);
   const files: string[] = [];
   for (const p of paths) {
     const st = await fs.stat(p).catch(() => undefined);
@@ -119,7 +120,7 @@ export async function loadSource(s: Source): Promise<LoadedSource> {
       return { schema: emptySchema('postgres'), warnings: [], title, label: 'Blank diagram (PostgreSQL)' };
     case 'erd': {
       const raw = JSON.parse(await fs.readFile(s.path, 'utf8'));
-      if (!isErdFile(raw)) throw new Error(`${path.basename(s.path)} is not an ERD Viewer diagram file.`);
+      if (!isErdFile(raw)) throw new Error(`${path.basename(s.path)} is not an DB Designer diagram file.`);
       return {
         schema: raw.schema,
         warnings: [],
@@ -127,6 +128,7 @@ export async function loadSource(s: Source): Promise<LoadedSource> {
         label: `Shared diagram · ${s.path}${raw.source ? ` · from ${raw.source}` : ''}`,
         layout: raw.layout,
         hiddenSchemas: raw.hiddenSchemas,
+        groups: raw.groups,
       };
     }
   }
@@ -136,7 +138,7 @@ export async function loadSource(s: Source): Promise<LoadedSource> {
 // Saved connections (kept in VS Code Secret Storage because they hold passwords)
 // ---------------------------------------------------------------------------
 
-const SECRET_KEY = 'erdViewer.connections';
+const SECRET_KEY = 'dbDesigner.connections';
 
 export function kindLabel(k: DbKind): string {
   return { postgres: 'PostgreSQL', mssql: 'SQL Server', mysql: 'MySQL / MariaDB', sqlite: 'SQLite' }[k];
@@ -157,7 +159,7 @@ export async function getSavedConnections(secrets: vscode.SecretStorage): Promis
   }
 }
 
-async function saveConnections(secrets: vscode.SecretStorage, list: ConnectionInfo[]) {
+export async function saveConnections(secrets: vscode.SecretStorage, list: ConnectionInfo[]) {
   await secrets.store(SECRET_KEY, JSON.stringify(list));
 }
 
@@ -236,7 +238,7 @@ function guessName(conn: string, kind: DbKind): string {
 export async function removeConnection(secrets: vscode.SecretStorage) {
   const saved = await getSavedConnections(secrets);
   if (!saved.length) {
-    vscode.window.showInformationMessage('No saved ERD Viewer connections.');
+    vscode.window.showInformationMessage('No saved DB Designer connections.');
     return;
   }
   const pick = await vscode.window.showQuickPick(
@@ -247,4 +249,43 @@ export async function removeConnection(secrets: vscode.SecretStorage) {
   const remove = new Set(pick.map((p) => p.c));
   await saveConnections(secrets, saved.filter((c) => !remove.has(c)));
   vscode.window.showInformationMessage(`Removed ${pick.length} connection(s).`);
+}
+
+// ---------------------------------------------------------------------------
+// Recently opened diagrams (for the sidebar)
+// ---------------------------------------------------------------------------
+
+export type RecentSource = Exclude<Source, { kind: 'db' }> | { kind: 'dbref'; name: string; dbKind: DbKind };
+
+export interface RecentEntry {
+  key: string;
+  title: string;
+  source: RecentSource;
+  at: number;
+}
+
+const RECENT_KEY = 'dbDesigner.recent';
+
+export function getRecent(context: vscode.ExtensionContext): RecentEntry[] {
+  return context.globalState.get<RecentEntry[]>(RECENT_KEY, []);
+}
+
+export async function addRecent(context: vscode.ExtensionContext, source: Source, title: string) {
+  if (source.kind === 'blank') return;
+  const recent: RecentSource = source.kind === 'db' ? { kind: 'dbref', name: source.connection.name, dbKind: source.connection.kind } : source;
+  const key = sourceKey(source);
+  const list = getRecent(context).filter((e) => e.key !== key);
+  list.unshift({ key, title, source: recent, at: Date.now() });
+  await context.globalState.update(RECENT_KEY, list.slice(0, 15));
+}
+
+export async function removeRecent(context: vscode.ExtensionContext, key?: string) {
+  await context.globalState.update(RECENT_KEY, key ? getRecent(context).filter((e) => e.key !== key) : []);
+}
+
+/** Turn a recent entry back into an openable source (looks up the saved connection for databases). */
+export async function resolveRecent(secrets: vscode.SecretStorage, r: RecentSource): Promise<Source | undefined> {
+  if (r.kind !== 'dbref') return r;
+  const conn = (await getSavedConnections(secrets)).find((c) => c.name === r.name && c.kind === r.dbKind);
+  return conn ? { kind: 'db', connection: conn } : undefined;
 }

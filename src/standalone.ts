@@ -98,6 +98,7 @@ export function buildStandaloneHtml(file: ErdFile, webviewJs: string, webviewCss
     readOnlySource: true,
     mode: 'standalone',
     hiddenSchemas: file.hiddenSchemas,
+    groups: file.groups,
   };
   // JSON is valid JS; escaping "<" keeps "</script>" and HTML comments from ending the element early.
   const data = JSON.stringify(load).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
@@ -107,7 +108,7 @@ export function buildStandaloneHtml(file: ErdFile, webviewJs: string, webviewCss
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta name="generator" content="ERD Viewer" />
+<meta name="generator" content="DB Designer" />
 <title>${title} · ERD</title>
 <style>${escapeForTag(THEME_CSS, 'style')}</style>
 <style>${escapeForTag(webviewCss, 'style')}</style>

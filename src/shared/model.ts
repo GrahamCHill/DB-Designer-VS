@@ -71,6 +71,20 @@ export interface Position {
   y: number;
 }
 
+/** A coloured area that owns tables (and nested groups); dragging it moves them together. */
+export interface DiagramGroup {
+  id: string;
+  name: string;
+  color: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  parentId?: string;
+  /** Member tables by `schema.table` key (same keys as Layout), so membership survives re-parsing. */
+  tables: string[];
+}
+
 /** Positions keyed by `schema.table` (lower-case) so they survive re-parsing. */
 export type Layout = Record<string, Position>;
 
@@ -105,7 +119,7 @@ export function fkColumnIds(schema: Schema): Set<string> {
 
 /** A diagram saved to share with others (`*.erd.json`). */
 export interface ErdFile {
-  format: 'erd-viewer';
+  format: 'db-designer-vs' | 'erd-viewer';
   version: 1;
   title: string;
   savedAt: string;
@@ -114,11 +128,12 @@ export interface ErdFile {
   schema: Schema;
   layout: Layout;
   hiddenSchemas?: string[];
+  groups?: DiagramGroup[];
 }
 
 export function isErdFile(x: unknown): x is ErdFile {
   const o = x as ErdFile;
-  return !!o && o.format === 'erd-viewer' && !!o.schema && Array.isArray(o.schema.tables);
+  return !!o && (o.format === 'db-designer-vs' || o.format === 'erd-viewer') && !!o.schema && Array.isArray(o.schema.tables);
 }
 
 /** How the webview is hosted. `standalone` = exported HTML opened in a browser (view-only). */
@@ -139,9 +154,11 @@ export type HostToWebview =
       /** Source is an .erd.json file that can be saved in place. */
       canSaveFile?: boolean;
       hiddenSchemas?: string[];
+      groups?: DiagramGroup[];
       aiProvider?: string;
     }
-  | { type: 'exported'; path: string }
+  | { type: 'exported'; path: string; note?: string }
+  | { type: 'validated'; results: import('../verify/index').Verification[] }
   | { type: 'saved' }
   | { type: 'aiResult'; review: import('./ai').AiReview }
   | { type: 'aiError'; message: string }
@@ -151,8 +168,16 @@ export type HostToWebview =
 
 export type WebviewToHost =
   | { type: 'ready' }
-  | { type: 'export'; mode: 'full' | 'diff'; schema: Schema; baseline: Schema; schemas?: string[] }
-  | { type: 'saveState'; layout: Layout; working: Schema; dirty: boolean }
+  | {
+      type: 'export';
+      mode: 'full' | 'diff';
+      schema: Schema;
+      baseline: Schema;
+      schemas?: string[];
+      /** Target dialect for full-schema export (migrations are PostgreSQL). */
+      target?: import('./sqlExport').ExportDialect;
+    }
+  | { type: 'saveState'; layout: Layout; working: Schema; dirty: boolean; groups?: DiagramGroup[] }
   | { type: 'reload' }
   | { type: 'discard' }
   | { type: 'info'; message: string }
@@ -162,5 +187,6 @@ export type WebviewToHost =
   | { type: 'saveFile'; file: ErdFile }
   | { type: 'aiReview'; request: import('./ai').ReviewRequest }
   | { type: 'aiCancel' }
+  | { type: 'validate'; schema: Schema; schemas?: string[] }
   | { type: 'aiChooseProvider' }
   | { type: 'opsApplied'; requestId: string; errors: string[] };

@@ -10,7 +10,7 @@ import { generateFullSql } from '../shared/pgExport';
 const text = (s: string) => new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(s)]);
 
 function noDiagram() {
-  return text('No ERD Viewer diagram is open. Ask the user to open one first (command "ERD Viewer: Open ERD from SQL Folder…" or "…from Database Connection…").');
+  return text('No DB Designer diagram is open. Ask the user to open one first (command "DB Designer: Open ERD from SQL Folder…" or "…from Database Connection…").');
 }
 
 function compactJson(s: Schema): string {
@@ -44,7 +44,7 @@ export function registerTools(context: vscode.ExtensionContext) {
   if (!vscode.lm?.registerTool) return; // older VS Code
 
   context.subscriptions.push(
-    vscode.lm.registerTool<{ format?: 'ddl' | 'json' }>('erd-viewer_getSchema', {
+    vscode.lm.registerTool<{ format?: 'ddl' | 'json' }>('db-designer_getSchema', {
       async invoke(options) {
         const panel = ErdPanel.active();
         const schema = panel?.currentSchema();
@@ -59,7 +59,7 @@ export function registerTools(context: vscode.ExtensionContext) {
       },
     }),
 
-    vscode.lm.registerTool<{ operations: unknown[]; description?: string }>('erd-viewer_applyChanges', {
+    vscode.lm.registerTool<{ operations: unknown[]; description?: string }>('db-designer_applyChanges', {
       prepareInvocation(options) {
         const { ops, problems } = sanitizeOps(options.input?.operations);
         const panel = ErdPanel.active();

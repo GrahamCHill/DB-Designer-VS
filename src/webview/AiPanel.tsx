@@ -38,7 +38,7 @@ export function AiPanel(p: Props) {
   return (
     <aside className="erd-editor erd-ai" onKeyDown={(e) => e.key === 'Escape' && p.onClose()}>
       <header>
-        <h2>✨ AI normalisation review</h2>
+        <h2>AI normalisation review</h2>
         <button className="icon-btn" title="Close (Esc)" onClick={p.onClose}>
           <CloseIcon />
         </button>

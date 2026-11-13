@@ -3,15 +3,13 @@
 // rasterised at high resolution.
 
 import { Position as Side, getSmoothStepPath } from '@xyflow/react';
+import { Box, edgeSides, edgeSidesFor } from './edgeGeometry';
+import { Rect, roundedPath, routeOrthogonal } from './router';
+import type { GroupBox } from './groups';
 import { Relation, Table } from '../shared/model';
 import { HEADER_HEIGHT, NODE_WIDTH, ROW_HEIGHT, nodeHeight } from './layout';
 
-export interface Box {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
+export type { Box } from './edgeGeometry';
 
 export interface Palette {
   bg: string;
@@ -49,13 +47,7 @@ export const DARK: Palette = {
   edge: '#7a7a7a',
 };
 
-/** Which side of each table a relation attaches to (shared with the live diagram). */
-export function edgeSides(parent: Box, child: Box, selfRef: boolean): { s: 'L' | 'R'; t: 'L' | 'R' } {
-  const pc = parent.x + parent.w / 2;
-  const cc = child.x + child.w / 2;
-  if (selfRef || Math.abs(pc - cc) < Math.min(parent.w, child.w) * 0.75) return { s: 'R', t: 'R' };
-  return pc < cc ? { s: 'R', t: 'L' } : { s: 'L', t: 'R' };
-}
+export { edgeSides } from './edgeGeometry';
 
 const FONT = `'Segoe UI', system-ui, -apple-system, Roboto, sans-serif`;
 const MONO = `Consolas, Menlo, 'DejaVu Sans Mono', monospace`;
@@ -97,9 +89,13 @@ export interface SvgInput {
   boxes: Map<string, Box>;
   palette: Palette;
   title?: string;
+  /** Route lines around tables (default true). */
+  routing?: boolean;
+  groups?: GroupBox[];
 }
 
-export function buildSvg({ tables, relations, boxes, palette: p, title }: SvgInput): { svg: string; width: number; height: number } {
+export function buildSvg(input: SvgInput): { svg: string; width: number; height: number } {
+  const { tables, relations, boxes, palette: p, title } = input;
   const PAD = 48;
   const shown = tables.filter((t) => boxes.has(t.id));
   let minX = Infinity;
@@ -112,6 +108,12 @@ export function buildSvg({ tables, relations, boxes, palette: p, title }: SvgInp
     minY = Math.min(minY, b.y);
     maxX = Math.max(maxX, b.x + b.w);
     maxY = Math.max(maxY, b.y + b.h);
+  }
+  for (const g of input.groups ?? []) {
+    minX = Math.min(minX, g.x);
+    minY = Math.min(minY, g.y);
+    maxX = Math.max(maxX, g.x + g.w);
+    maxY = Math.max(maxY, g.y + g.h);
   }
   if (!shown.length) throw new Error('The diagram is empty');
   const titleH = title ? 44 : 0;
@@ -135,6 +137,19 @@ export function buildSvg({ tables, relations, boxes, palette: p, title }: SvgInp
   if (title) out.push(`<text x="${PAD}" y="${PAD - 4}" font-size="20" font-weight="600" fill="${p.fg}">${esc(title)}</text>`);
   out.push(`<g transform="translate(${ox} ${oy})">`);
 
+  const obstacles: Rect[] = shown.map((t) => {
+    const b = boxes.get(t.id)!;
+    return { x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h };
+  });
+
+  // Groups behind everything, then edges, then tables.
+  for (const g of input.groups ?? []) {
+    out.push(
+      `<g><rect x="${g.x}" y="${g.y}" width="${g.w}" height="${g.h}" rx="12" fill="${g.color}" fill-opacity="0.06" stroke="${g.color}" stroke-opacity="0.55" stroke-width="1.5"${g.depth ? ' stroke-dasharray="6 4"' : ''}/>`,
+      `<text x="${g.x + 14}" y="${g.y + 21}" font-family="${esc(MONO)}" font-size="11" font-weight="700" letter-spacing="0.08em" fill="${g.color}">${esc(g.name.toUpperCase())}</text></g>`,
+    );
+  }
+
   // Edges first so tables sit on top.
   const chips: string[] = [];
   out.push(`<g fill="none" stroke="${p.edge}" stroke-width="1.4">`);
@@ -145,6 +160,8 @@ export function buildSvg({ tables, relations, boxes, palette: p, title }: SvgInp
     const pb = boxes.get(parent.id)!;
     const cb = boxes.get(child.id)!;
     const { s, t } = edgeSides(pb, cb, parent.id === child.id);
+    void s;
+    void t;
     const fk = r.fromColumns.map((id) => child.columns.find((c) => c.id === id));
     const childPk = child.columns.filter((c) => c.pk);
     const oneToOne =
@@ -152,20 +169,26 @@ export function buildSvg({ tables, relations, boxes, palette: p, title }: SvgInp
       (fk.length > 1 && fk.length === childPk.length && fk.every((c) => c?.pk));
     r.fromColumns.forEach((fc, i) => {
       const tc = r.toColumns[i];
-      const sx = s === 'R' ? pb.x + pb.w : pb.x;
-      const sy = rowY(pb, parent, tc);
-      const tx = t === 'R' ? cb.x + cb.w : cb.x;
-      const ty = rowY(cb, child, fc);
-      const [path] = getSmoothStepPath({
-        sourceX: sx,
-        sourceY: sy,
-        sourcePosition: s === 'R' ? Side.Right : Side.Left,
-        targetX: tx,
-        targetY: ty,
-        targetPosition: t === 'R' ? Side.Right : Side.Left,
-        borderRadius: 10,
-        offset: 28,
-      });
+      const geo = edgeSidesFor(parent, pb, tc, child, cb, fc, parent.id === child.id);
+      const sx = geo.source.x;
+      const sy = geo.source.y;
+      const tx = geo.target.x;
+      const ty = geo.target.y;
+      const route = input.routing === false ? null : routeOrthogonal(geo.source, geo.sSide, geo.target, geo.tSide, obstacles);
+      const path = route
+        ? roundedPath(route)
+        : getSmoothStepPath({
+            sourceX: sx,
+            sourceY: sy,
+            sourcePosition: geo.sSide === 'R' ? Side.Right : Side.Left,
+            targetX: tx,
+            targetY: ty,
+            targetPosition: geo.tSide === 'R' ? Side.Right : Side.Left,
+            borderRadius: 10,
+            offset: 28,
+          })[0];
+      const s = geo.sSide;
+      const t = geo.tSide;
       out.push(`<path d="${path}" marker-start="url(#one)" marker-end="url(#${oneToOne ? 'one' : 'many'})"/>`);
       const chip = (x: number, y: number, label: string, color: string) =>
         `<g><rect x="${x - 10}" y="${y - 21}" width="20" height="13" rx="3" fill="${p.bg}" stroke="${color}"/><text x="${x}" y="${y - 11.5}" font-family="${esc(MONO)}" font-size="9" font-weight="700" text-anchor="middle" fill="${color}">${label}</text></g>`;

@@ -8,7 +8,7 @@ const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort((a, b) 
   .map((f) => ({ name: f, content: fs.readFileSync(path.join(dir, f), 'utf8') }));
 const { schema } = parseSql(files);
 const html = buildStandaloneHtml(
-  { format: 'erd-viewer', version: 1, title: path.basename(path.dirname(dir)), savedAt: new Date().toISOString(), source: dir, schema, layout: {} },
+  { format: 'db-designer-vs', version: 1, title: path.basename(path.dirname(dir)), savedAt: new Date().toISOString(), source: dir, schema, layout: {} },
   fs.readFileSync('dist/webview.js', 'utf8'),
   fs.readFileSync('dist/webview.css', 'utf8'),
 );

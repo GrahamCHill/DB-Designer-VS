@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -15,6 +15,7 @@ import {
 } from '@xyflow/react';
 import {
   Column,
+  DiagramGroup,
   ErdFile,
   HostToWebview,
   Layout,
@@ -34,17 +35,26 @@ import { AiSuggestion } from '../shared/ai';
 import { RelationDialog, RelationDraft } from './RelationDialog';
 import { AiPanel, AiState } from './AiPanel';
 import { Box, DARK, LIGHT, boxFor, edgeSides, renderDiagram } from './exportImage';
+import { EXPORT_DIALECTS, ExportDialect } from '../shared/sqlExport';
+import { ValidationDialog } from './ValidationDialog';
+import type { Verification } from '../verify/index';
 import { NodeActions, NodeActionsContext, TableNode, TableNodeData, TableNodeType } from './TableNode';
 import { EdgeActionsContext, EdgeMarkers, RelationEdge, RelationEdgeType } from './RelationEdge';
 import { Mutate, TableEditor, addColumnTo, newColumn } from './TableEditor';
-import { NODE_WIDTH, autoLayout, placeMissing } from './layout';
+import { NODE_WIDTH, autoLayout, layoutItems, nodeHeight, placeMissing } from './layout';
+import { GroupActions, GroupActionsContext, GroupNode, GroupNodeData, GroupNodeType } from './GroupNode';
+import { GROUP_COLORS, GroupBox, descendants, groupAt, groupDepth, parentFor, rectAround } from './groups';
+import { RouterContext } from './RelationEdge';
+import type { Rect } from './router';
 import { DiamondIcon, HashIcon, KeyIcon, LinkIcon, UniqueIcon } from './icons';
 
 declare function acquireVsCodeApi(): { postMessage(m: unknown): void };
 const vscode = acquireVsCodeApi();
 const post = (m: WebviewToHost) => vscode.postMessage(m);
 
-const nodeTypes = { table: TableNode };
+const nodeTypes = { table: TableNode, tablegroup: GroupNode };
+type AnyNode = TableNodeType | GroupNodeType;
+const isTable = (n: AnyNode): n is TableNodeType => n.type === 'table';
 const edgeTypes = { relation: RelationEdge };
 
 /** Supabase/managed-Postgres internal schemas hidden by default for live connections. */
@@ -106,10 +116,33 @@ function defaultSchemaOf(s: Schema): string {
 }
 
 const relIdOf = (edgeId: string) => edgeId.split('::')[0];
+
+function boundsOf(tables: Table[], pos: Record<string, Position>, groups: DiagramGroup[] = []) {
+  let x1 = Infinity;
+  let y1 = Infinity;
+  let x2 = -Infinity;
+  let y2 = -Infinity;
+  for (const g of groups) {
+    x1 = Math.min(x1, g.x);
+    y1 = Math.min(y1, g.y);
+    x2 = Math.max(x2, g.x + g.w);
+    y2 = Math.max(y2, g.y + g.h);
+  }
+  for (const t of tables) {
+    const p = pos[t.id];
+    if (!p) continue;
+    const b = boxFor(t, p);
+    x1 = Math.min(x1, b.x);
+    y1 = Math.min(y1, b.y);
+    x2 = Math.max(x2, b.x + b.w);
+    y2 = Math.max(y2, b.y + b.h);
+  }
+  return Number.isFinite(x1) ? { x: x1, y: y1, width: x2 - x1, height: y2 - y1 } : undefined;
+}
 const colIdOfHandle = (h: string | null | undefined) => (h ? h.replace(/::[LR]$/, '') : '');
 
 export function App() {
-  const rf = useReactFlow<TableNodeType, RelationEdgeType>();
+  const rf = useReactFlow<AnyNode, RelationEdgeType>();
   const [meta, setMeta] = useState<Meta>();
   const [baseline, setBaseline] = useState<Schema>(emptySchema());
   const [schema, setSchemaState] = useState<Schema>(emptySchema());
@@ -117,7 +150,25 @@ export function App() {
   const history = useRef<History>({ past: [], future: [], lastTime: 0 });
   const [historyTick, setHistoryTick] = useState(0);
   const posRef = useRef<Record<string, Position>>({});
-  const [nodes, setNodes] = useState<TableNodeType[]>([]);
+  const [nodes, setNodes] = useState<AnyNode[]>([]);
+  const nodesRef = useRef<AnyNode[]>([]);
+  nodesRef.current = nodes;
+  const [groups, setGroupsState] = useState<DiagramGroup[]>([]);
+  const groupsRef = useRef<DiagramGroup[]>([]);
+  const setGroups = useCallback((g: DiagramGroup[]) => {
+    groupsRef.current = g;
+    setGroupsState(g);
+  }, []);
+  const [dragging, setDragging] = useState<Set<string>>(new Set());
+  const [routing, setRouting] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('dbd.routing') !== 'off';
+    } catch {
+      return true;
+    }
+  });
+  const [routeSnap, setRouteSnap] = useState<{ rects: Rect[]; version: number }>({ rects: [], version: 0 });
+  const routeSig = useRef('');
   const [hoverTable, setHoverTable] = useState<string>();
   const [hoverEdge, setHoverEdge] = useState<string>();
   const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set());
@@ -132,6 +183,7 @@ export function App() {
   const [ai, setAi] = useState<AiState>({ loading: false, applied: {} });
   const [aiProvider, setAiProvider] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [validation, setValidation] = useState<Verification[] | 'running'>();
   const [imageTheme, setImageTheme] = useState<'light' | 'dark'>(() => {
     try {
       return (localStorage.getItem('erd.imageTheme') as 'light' | 'dark') || 'light';
@@ -167,7 +219,7 @@ export function App() {
   const scheduleSave = useCallback(() => {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      post({ type: 'saveState', layout: currentLayout(), working: schemaRef.current, dirty: dirtyRef.current });
+      post({ type: 'saveState', layout: currentLayout(), working: schemaRef.current, dirty: dirtyRef.current, groups: groupsRef.current });
     }, 400);
   }, [currentLayout]);
 
@@ -264,6 +316,7 @@ export function App() {
         if (known === 0) Object.assign(pos, autoLayout(m.working.tables, m.working));
         else if (known < m.working.tables.length) Object.assign(pos, placeMissing(m.working.tables, pos));
         posRef.current = pos;
+        setGroups(m.groups ?? []);
         if (firstLoad.current) {
           const schemas = new Set(m.working.tables.map((t) => t.schema));
           const hide = m.hiddenSchemas ?? (m.readOnlySource && m.mode !== 'standalone' ? [...schemas].filter((s) => INTERNAL_SCHEMAS.has(s)) : []);
@@ -273,10 +326,14 @@ export function App() {
         if (known === 0 && m.mode !== 'standalone') scheduleSave();
         if (firstLoad.current) {
           firstLoad.current = false;
-          setTimeout(() => rf.fitView({ padding: 0.08, maxZoom: 1 }), 80);
+          const visible = m.working.tables.filter((t) => !(m.hiddenSchemas ?? []).includes(t.schema));
+          const b = boundsOf(visible.length ? visible : m.working.tables, pos, m.groups ?? []);
+          setTimeout(() => (b ? rf.fitBounds(b, { padding: 0.05 }) : rf.fitView({ padding: 0.08, maxZoom: 1 })), 80);
         }
       } else if (m.type === 'exported') {
-        setToast(`Saved ${m.path}`);
+        setToast(m.note ? `Saved ${m.path}. ${m.note}` : `Saved ${m.path}`);
+      } else if (m.type === 'validated') {
+        setValidation(m.results);
       } else if (m.type === 'saved') {
         setToast('Diagram saved');
       } else if (m.type === 'aiResult') {
@@ -304,6 +361,23 @@ export function App() {
     return () => window.removeEventListener('message', onMsg);
   }, [rf, setSchema, scheduleSave, mutate]);
 
+  // Keep an open dropdown inside the window (the toolbar wraps on narrow editors).
+  useLayoutEffect(() => {
+    if (!menu) return;
+    const el = document.querySelector<HTMLElement>('.erd-toolbar .menu');
+    if (!el) return;
+    el.style.left = '';
+    el.style.right = '';
+    const r = el.getBoundingClientRect();
+    if (r.left < 4) {
+      el.style.left = '0';
+      el.style.right = 'auto';
+    } else if (r.right > window.innerWidth - 4) {
+      el.style.left = 'auto';
+      el.style.right = '0';
+    }
+  }, [menu]);
+
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(undefined), 4000);
@@ -330,7 +404,7 @@ export function App() {
   }, [schema.relations, tableById]);
 
   const selectedTable = useMemo(() => {
-    const sel = nodes.filter((n) => n.selected);
+    const sel = nodes.filter((n) => n.selected && isTable(n));
     return sel.length === 1 ? sel[0].id : undefined;
   }, [nodes]);
 
@@ -370,8 +444,28 @@ export function App() {
     const showSchema = allSchemas.length > 1 || (allSchemas[0] !== undefined && !['public', 'dbo', ''].includes(allSchemas[0]));
     setNodes((prev) => {
       const prevById = new Map(prev.map((n) => [n.id, n]));
-      return visibleTables.map((t) => {
-        const p = prevById.get(t.id);
+      const keys = new Set(schema.tables.map((t) => tableKey(t)));
+      const groupNodes: GroupNodeType[] = groups.map((g) => {
+        const id = `grp:${g.id}`;
+        const p = prevById.get(id) as GroupNodeType | undefined;
+        const depth = groupDepth(g.id, groups);
+        const data: GroupNodeData = { group: g, depth, members: g.tables.filter((k) => keys.has(k)).length, editable };
+        return {
+          ...(p ?? {}),
+          id,
+          type: 'tablegroup' as const,
+          position: { x: g.x, y: g.y },
+          width: g.w,
+          height: g.h,
+          style: { width: g.w, height: g.h },
+          zIndex: -1000 + depth,
+          dragHandle: '.erd-group-header',
+          deletable: false,
+          data: p && shallowEqual(p.data, data) ? p.data : data,
+        };
+      });
+      const tableNodes = visibleTables.map((t) => {
+        const p = prevById.get(t.id) as TableNodeType | undefined;
         const hlCols = highlight.edges.size
           ? t.columns
               .filter((c) => highlight.cols.has(c.id))
@@ -401,16 +495,37 @@ export function App() {
           deletable: false,
         };
       });
+      return [...groupNodes, ...tableNodes];
     });
-  }, [visibleTables, fkTargets, highlight, selectedTable, changedCols, allSchemas]);
+  }, [visibleTables, fkTargets, highlight, selectedTable, changedCols, allSchemas, groups, editable, schema.tables]);
+
+  // Obstacles for the edge router: table rectangles, refreshed when geometry settles (not mid-drag).
+  useEffect(() => {
+    if (dragging.size) return;
+    const rects: Rect[] = [];
+    for (const n of nodes) {
+      if (!isTable(n)) continue;
+      const w = n.measured?.width ?? NODE_WIDTH;
+      const h = n.measured?.height ?? nodeHeight(n.data.table);
+      rects.push({ x1: Math.round(n.position.x), y1: Math.round(n.position.y), x2: Math.round(n.position.x + w), y2: Math.round(n.position.y + h) });
+    }
+    const sig = rects.map((r) => `${r.x1},${r.y1},${r.x2},${r.y2}`).join(';');
+    if (sig === routeSig.current) return;
+    const t = setTimeout(() => {
+      routeSig.current = sig;
+      setRouteSnap((prev) => ({ rects, version: prev.version + 1 }));
+    }, 60);
+    return () => clearTimeout(t);
+  }, [nodes, dragging]);
 
   // Keep the position cache current.
   useEffect(() => {
-    for (const n of nodes) posRef.current[n.id] = n.position;
+    for (const n of nodes) if (isTable(n)) posRef.current[n.id] = n.position;
   }, [nodes]);
 
   const edges = useMemo<RelationEdgeType[]>(() => {
-    const pos = new Map(nodes.map((n) => [n.id, n]));
+    const pos = new Map(nodes.filter(isTable).map((n) => [n.id, n]));
+    const groupMoving = [...dragging].some((id) => id.startsWith('grp:'));
     const out: RelationEdgeType[] = [];
     for (const r of schema.relations) {
       const parent = pos.get(r.toTable);
@@ -453,18 +568,134 @@ export function App() {
             hovered: hoverEdge === r.id,
             highlighted,
             dimmed: highlight.dimOthers && !highlighted,
+            moving: groupMoving || dragging.has(r.toTable) || dragging.has(r.fromTable),
           },
         });
       });
     }
     return out;
-  }, [nodes, schema.relations, tableById, highlight, selectedEdges, hoverEdge]);
+  }, [nodes, schema.relations, tableById, highlight, selectedEdges, hoverEdge, dragging]);
 
   // ---- React Flow handlers -------------------------------------------------
 
-  const onNodesChange = useCallback((changes: NodeChange<TableNodeType>[]) => {
-    setNodes((nds) => applyNodeChanges(changes.filter((c) => c.type !== 'remove'), nds));
-  }, []);
+  const onNodesChange = useCallback(
+    (changes: NodeChange<AnyNode>[]) => {
+      const nds = nodesRef.current;
+      const byId = new Map(nds.map((n) => [n.id, n]));
+      const gs = groupsRef.current;
+      const extra: NodeChange<AnyNode>[] = [];
+      const moved = new Map<string, { dx: number; dy: number }>();
+      const resizing = new Set(changes.filter((c) => c.type === 'dimensions' && c.resizing).map((c) => (c as { id: string }).id));
+      for (const c of changes) {
+        if (c.type !== 'position' || !c.position || !c.id.startsWith('grp:') || resizing.has(c.id)) continue;
+        const node = byId.get(c.id);
+        if (!node) continue;
+        const dx = c.position.x - node.position.x;
+        const dy = c.position.y - node.position.y;
+        if (!dx && !dy) continue;
+        const gid = c.id.slice(4);
+        const subtree = new Set([gid, ...descendants(gid, gs)]);
+        for (const g of gs) if (subtree.has(g.id)) moved.set(g.id, { dx, dy });
+        const keys = new Set(gs.filter((g) => subtree.has(g.id)).flatMap((g) => g.tables));
+        for (const n of nds) {
+          if (n.id === c.id || changes.some((x) => 'id' in x && x.id === n.id)) continue;
+          const member = isTable(n) ? keys.has(tableKey(n.data.table)) : subtree.has(n.id.slice(4));
+          if (member) extra.push({ type: 'position', id: n.id, position: { x: n.position.x + dx, y: n.position.y + dy }, dragging: c.dragging });
+        }
+      }
+      setNodes((cur) => applyNodeChanges([...changes.filter((c) => c.type !== 'remove'), ...extra], cur));
+      if (moved.size) setGroups(gs.map((g) => (moved.has(g.id) ? { ...g, x: g.x + moved.get(g.id)!.dx, y: g.y + moved.get(g.id)!.dy } : g)));
+    },
+    [setGroups],
+  );
+
+  /** After a drag: tables join the smallest group they were dropped in; groups find their parent group. */
+  const settleMembership = useCallback(
+    (draggedIds: string[]) => {
+      let gs = groupsRef.current;
+      const byId = new Map(nodesRef.current.map((n) => [n.id, n]));
+      let changed = false;
+      for (const id of draggedIds) {
+        const n = byId.get(id);
+        if (!n) continue;
+        if (isTable(n)) {
+          const key = tableKey(n.data.table);
+          const w = n.measured?.width ?? NODE_WIDTH;
+          const h = n.measured?.height ?? nodeHeight(n.data.table);
+          const target = groupAt(n.position.x + w / 2, n.position.y + h / 2, gs);
+          const current = gs.find((g) => g.tables.includes(key));
+          if (target?.id === current?.id) continue;
+          gs = gs.map((g) => ({
+            ...g,
+            tables: g.id === target?.id ? [...g.tables.filter((k) => k !== key), key] : g.tables.filter((k) => k !== key),
+          }));
+          changed = true;
+        } else {
+          const g = gs.find((x) => `grp:${x.id}` === id);
+          if (!g) continue;
+          const parent = parentFor(g, gs);
+          if (parent !== g.parentId) {
+            gs = gs.map((x) => (x.id === g.id ? { ...x, parentId: parent } : x));
+            changed = true;
+          }
+        }
+      }
+      if (changed) setGroups(gs);
+    },
+    [setGroups],
+  );
+
+  const groupActions: GroupActions = useMemo(
+    () => ({
+      update: (id, patch) => {
+        setGroups(groupsRef.current.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+        scheduleSave();
+      },
+      remove: (id) => {
+        const gone = groupsRef.current.find((g) => g.id === id);
+        setGroups(groupsRef.current.filter((g) => g.id !== id).map((g) => (g.parentId === id ? { ...g, parentId: gone?.parentId } : g)));
+        scheduleSave();
+      },
+      resized: (id, rect) => {
+        let gs = groupsRef.current.map((g) => (g.id === id ? { ...g, ...rect } : g));
+        // Re-evaluate which tables belong to the resized group.
+        for (const n of nodesRef.current) {
+          if (!isTable(n)) continue;
+          const key = tableKey(n.data.table);
+          const w = n.measured?.width ?? NODE_WIDTH;
+          const h = n.measured?.height ?? nodeHeight(n.data.table);
+          const target = groupAt(n.position.x + w / 2, n.position.y + h / 2, gs);
+          gs = gs.map((g) => ({ ...g, tables: g.id === target?.id ? [...new Set([...g.tables, key])] : g.tables.filter((k) => k !== key) }));
+        }
+        setGroups(gs.map((g) => (g.id === id ? { ...g, parentId: parentFor(g, gs) } : g)));
+        scheduleSave();
+      },
+    }),
+    [setGroups, scheduleSave],
+  );
+
+  const addGroup = useCallback(() => {
+    const sel = nodesRef.current.filter((n): n is TableNodeType => isTable(n) && !!n.selected);
+    const gs = groupsRef.current;
+    const id = newId('g');
+    const color = GROUP_COLORS[gs.length % GROUP_COLORS.length];
+    let rect: { x: number; y: number; w: number; h: number };
+    let tables: string[] = [];
+    if (sel.length) {
+      rect = rectAround(sel.map((n) => ({ x: n.position.x, y: n.position.y, w: n.measured?.width ?? NODE_WIDTH, h: n.measured?.height ?? nodeHeight(n.data.table) })));
+      tables = sel.map((n) => tableKey(n.data.table));
+    } else {
+      const el = document.querySelector('.react-flow')?.getBoundingClientRect();
+      const c = rf.screenToFlowPosition({ x: (el?.left ?? 0) + (el?.width ?? 800) / 2, y: (el?.top ?? 0) + (el?.height ?? 600) / 2 });
+      rect = { x: Math.round(c.x - 300), y: Math.round(c.y - 200), w: 600, h: 400 };
+    }
+    const group: DiagramGroup = { id, name: sel.length ? `Group ${gs.length + 1}` : 'New group', color, ...rect, tables };
+    const next = gs.map((g) => ({ ...g, tables: g.tables.filter((k) => !tables.includes(k)) }));
+    group.parentId = parentFor(group, next);
+    setGroups([...next, group]);
+    scheduleSave();
+    setToast(sel.length ? `Grouped ${sel.length} table${sel.length === 1 ? '' : 's'}. Use Edit on the group header to rename or recolour it` : 'Empty group added: drag tables into it, or select tables first and then add a group');
+  }, [rf, setGroups, scheduleSave]);
 
   const removeRelations = useCallback(
     (ids: Set<string>) => {
@@ -580,7 +811,7 @@ export function App() {
       y: (rect?.top ?? 0) + (rect?.height ?? window.innerHeight) / 2,
     });
     // Find a free spot near the centre of the viewport (spiral outwards on a grid).
-    const rects = rf.getNodes().map((n) => ({
+    const rects = rf.getNodes().filter((n) => n.type === 'table').map((n) => ({
       x: n.position.x,
       y: n.position.y,
       w: n.measured?.width ?? NODE_WIDTH,
@@ -621,12 +852,56 @@ export function App() {
   }, [mutate, rf, hiddenSchemas]);
 
   const runAutoLayout = useCallback(() => {
-    const pos = autoLayout(visibleTables, schemaRef.current);
+    const gs = groupsRef.current;
+    let pos: Record<string, Position>;
+    let newGroups = gs;
+    if (!gs.length) pos = autoLayout(visibleTables, schemaRef.current);
+    else {
+      // Top-level groups are laid out as single blocks (keeping their inside arrangement); other tables individually.
+      const keyOf = new Map(visibleTables.map((t) => [t.id, tableKey(t)]));
+      const top = gs.filter((g) => !g.parentId || !gs.some((x) => x.id === g.parentId));
+      const blockOf = new Map<string, string>(); // table id -> top group id
+      for (const g of top) {
+        const sub = new Set([g.id, ...descendants(g.id, gs)]);
+        const keys = new Set(gs.filter((x) => sub.has(x.id)).flatMap((x) => x.tables));
+        for (const t of visibleTables) if (keys.has(keyOf.get(t.id)!)) blockOf.set(t.id, g.id);
+      }
+      const items = [
+        ...top.map((g) => ({ id: `grp:${g.id}`, w: g.w, h: g.h })),
+        ...visibleTables.filter((t) => !blockOf.has(t.id)).map((t) => ({ id: t.id, w: NODE_WIDTH, h: nodeHeight(t) })),
+      ];
+      const itemOf = (tableId: string) => (blockOf.has(tableId) ? `grp:${blockOf.get(tableId)}` : tableId);
+      const placed = layoutItems(items, schemaRef.current.relations.map((r) => ({ from: itemOf(r.fromTable), to: itemOf(r.toTable) })));
+      pos = {};
+      const delta = new Map<string, { dx: number; dy: number }>();
+      for (const g of top) {
+        const p = placed[`grp:${g.id}`];
+        if (p) delta.set(g.id, { dx: p.x - g.x, dy: p.y - g.y });
+      }
+      for (const t of visibleTables) {
+        if (blockOf.has(t.id)) {
+          const d = delta.get(blockOf.get(t.id)!);
+          const cur = posRef.current[t.id];
+          if (d && cur) pos[t.id] = { x: cur.x + d.dx, y: cur.y + d.dy };
+        } else if (placed[t.id]) pos[t.id] = placed[t.id];
+      }
+      const topOf = (g: DiagramGroup): string => {
+        let cur = g;
+        while (cur.parentId && gs.some((x) => x.id === cur.parentId)) cur = gs.find((x) => x.id === cur.parentId)!;
+        return cur.id;
+      };
+      newGroups = gs.map((g) => {
+        const d = delta.get(topOf(g));
+        return d ? { ...g, x: g.x + d.dx, y: g.y + d.dy } : g;
+      });
+    }
     Object.assign(posRef.current, pos);
+    setGroups(newGroups);
     setNodes((nds) => nds.map((n) => (pos[n.id] ? { ...n, position: pos[n.id] } : n)));
     scheduleSave();
-    setTimeout(() => rf.fitView({ padding: 0.08, maxZoom: 1, duration: 300 }), 50);
-  }, [visibleTables, rf, scheduleSave]);
+    const b = boundsOf(visibleTables, posRef.current, newGroups);
+    setTimeout(() => (b ? rf.fitBounds(b, { padding: 0.05, duration: 300 }) : rf.fitView({ padding: 0.08, maxZoom: 1, duration: 300 })), 50);
+  }, [visibleTables, rf, scheduleSave, setGroups]);
 
   const matches = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -643,10 +918,10 @@ export function App() {
     [rf],
   );
 
-  const doExport = (mode: 'full' | 'diff') => {
+  const doExport = (mode: 'full' | 'diff', target: ExportDialect = 'postgres') => {
     setMenu(undefined);
     const schemas = hiddenSchemas.size ? allSchemas.filter((s) => !hiddenSchemas.has(s)) : undefined;
-    post({ type: 'export', mode, schema: schemaRef.current, baseline, schemas });
+    post({ type: 'export', mode, schema: schemaRef.current, baseline, schemas, target });
   };
 
   const exportImage = async (format: 'png' | 'svg') => {
@@ -669,6 +944,10 @@ export function App() {
           boxes,
           palette: imageTheme === 'light' ? LIGHT : DARK,
           title: meta?.title,
+          routing,
+          groups: groupsRef.current.map(
+            (g): GroupBox => ({ x: g.x, y: g.y, w: g.w, h: g.h, name: g.name, color: g.color, depth: groupDepth(g.id, groupsRef.current) }),
+          ),
         },
         format,
       );
@@ -687,13 +966,14 @@ export function App() {
   };
 
   const erdFile = (): ErdFile => ({
-    format: 'erd-viewer',
+    format: 'db-designer-vs',
     version: 1,
     title: meta?.title ?? 'Diagram',
     savedAt: new Date().toISOString(),
     schema: schemaRef.current,
     layout: currentLayout(),
     hiddenSchemas: hiddenSchemas.size ? [...hiddenSchemas] : undefined,
+    groups: groupsRef.current.length ? groupsRef.current : undefined,
   });
 
   const share = (kind: 'erd' | 'html') => {
@@ -748,6 +1028,8 @@ export function App() {
   return (
     <NodeActionsContext.Provider value={nodeActions}>
       <EdgeActionsContext.Provider value={edgeActions}>
+      <GroupActionsContext.Provider value={groupActions}>
+      <RouterContext.Provider value={{ rects: routeSnap.rects, version: routeSnap.version, enabled: routing }}>
         <div className={`erd-app ${editable ? '' : 'standalone'} ${exporting ? 'exporting' : ''}`} onClick={() => menu && setMenu(undefined)}>
           <div className="erd-toolbar" onClick={(e) => e.stopPropagation()}>
             <div className="tb-title">
@@ -814,12 +1096,38 @@ export function App() {
                   >
                     + Relation
                   </button>
+                  <button className="btn" onClick={addGroup} title="Group the selected tables (Ctrl/Shift-click or drag a box to select several), or add an empty group">
+                    + Group
+                  </button>
                 </>
               ) : null}
-              <button className="btn" onClick={runAutoLayout} title="Re-arrange tables automatically">
+              <button className="btn" onClick={runAutoLayout} title="Re-arrange tables automatically (groups move as blocks)">
                 Auto layout
               </button>
-              <button className="btn" onClick={() => rf.fitView({ padding: 0.08, duration: 300 })} title="Fit diagram to screen">
+              <button
+                className={`btn ${routing ? 'on' : ''}`}
+                onClick={() => {
+                  const v = !routing;
+                  setRouting(v);
+                  try {
+                    localStorage.setItem('dbd.routing', v ? 'on' : 'off');
+                  } catch {
+                    /* storage unavailable */
+                  }
+                }}
+                title={routing ? 'Lines are routed around tables. Click for direct lines' : 'Route lines around tables'}
+              >
+                {routing ? 'Lines: routed' : 'Lines: direct'}
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  const b = boundsOf(visibleTables, posRef.current, groupsRef.current);
+                  if (b) rf.fitBounds(b, { padding: 0.05, duration: 300 });
+                  else rf.fitView({ padding: 0.08, duration: 300 });
+                }}
+                title="Fit diagram to screen"
+              >
                 Fit
               </button>
               {editable ? (
@@ -839,7 +1147,7 @@ export function App() {
                   </button>
                   {menu === 'warnings' ? (
                     <div className="menu wide">
-                      <div className="menu-head">Parser warnings (also in the "ERD Viewer" output channel)</div>
+                      <div className="menu-head">Parser warnings (also in the "DB Designer" output channel)</div>
                       {meta.warnings.slice(0, 200).map((w, i) => (
                         <div key={i} className="menu-text">
                           {w}
@@ -869,7 +1177,7 @@ export function App() {
                     onClick={() => (setEditor(undefined), setAiOpen(!aiOpen))}
                     title="Ask an AI model to review the schema for normalisation problems"
                   >
-                    ✨ AI review
+                    AI review
                   </button>
                 </>
               ) : null}
@@ -906,7 +1214,7 @@ export function App() {
                     <div className="menu-sep" />
                     <button className="menu-item col" onClick={() => share('erd')}>
                       <span>Diagram file (.erd.json)</span>
-                      <span className="muted small">Schema + layout; opens and stays editable in ERD Viewer</span>
+                      <span className="muted small">Schema + layout; opens and stays editable in DB Designer</span>
                     </button>
                     {editable ? (
                       <button className="menu-item col" onClick={() => share('html')}>
@@ -924,12 +1232,37 @@ export function App() {
                   </button>
                   {menu === 'export' ? (
                     <div className="menu right">
-                      <button className="menu-item col" onClick={() => doExport('full')}>
-                        <span>Full schema (PostgreSQL)</span>
-                        <span className="muted small">
-                          CREATE TABLE for {hiddenSchemas.size ? 'visible schemas' : 'every table'}, then foreign keys
-                        </span>
+                      <button
+                        className="menu-item col"
+                        onClick={() => {
+                          setMenu(undefined);
+                          setValidation('running');
+                          const schemas = hiddenSchemas.size ? allSchemas.filter((x) => !hiddenSchemas.has(x)) : undefined;
+                          post({ type: 'validate', schema: schemaRef.current, schemas });
+                        }}
+                      >
+                        <span>Validate SQL (all dialects)</span>
+                        <span className="muted small">Executes PostgreSQL &amp; SQLite output in-process; checks SQL Server &amp; MySQL output</span>
                       </button>
+                      <div className="menu-sep" />
+                      <div className="menu-head">
+                        Full schema: CREATE TABLE for {hiddenSchemas.size ? 'visible schemas' : 'every table'} + keys
+                      </div>
+                      {EXPORT_DIALECTS.map((d) => (
+                        <button key={d.id} className="menu-item col" onClick={() => doExport('full', d.id)}>
+                          <span>{d.label}</span>
+                          <span className="muted small">
+                            {d.id === 'postgres'
+                              ? 'Same types as the diagram'
+                              : d.id === 'mssql'
+                                ? 'Closest SQL Server types · cascade paths & key sizes handled'
+                                : d.id === 'mysql'
+                                  ? 'Closest MySQL 8 types · one database, InnoDB'
+                                  : 'SQLite types · foreign keys inline'}
+                          </span>
+                        </button>
+                      ))}
+                      <div className="menu-sep" />
                       <button className="menu-item col" disabled={!dirty} onClick={() => doExport('diff')}>
                         <span>Changes only — migration (PostgreSQL)</span>
                         <span className="muted small">{dirty ? 'ALTER/CREATE/DROP for edits made in the diagram' : 'No edits yet'}</span>
@@ -942,7 +1275,7 @@ export function App() {
           </div>
           <div className="erd-main">
             <div className="erd-canvas">
-              <ReactFlow<TableNodeType, RelationEdgeType>
+              <ReactFlow<AnyNode, RelationEdgeType>
                 nodes={nodes}
                 edges={edges}
                 nodeTypes={nodeTypes}
@@ -953,7 +1286,15 @@ export function App() {
                 nodesConnectable={editable}
                 isValidConnection={isValidConnection}
                 connectionMode={ConnectionMode.Loose}
-                onNodeDragStop={() => editable && scheduleSave()}
+                onNodeDragStart={(_, __, dragged) => setDragging(new Set(dragged.map((n) => n.id)))}
+                onNodeDragStop={(_, __, dragged) => {
+                  setDragging(new Set());
+                  if (!editable) return;
+                  settleMembership(dragged.map((n) => n.id));
+                  scheduleSave();
+                }}
+                elevateNodesOnSelect={false}
+                multiSelectionKeyCode={['Control', 'Meta', 'Shift']}
                 onNodeMouseEnter={(_, n) => setHoverTable(n.id)}
                 onNodeMouseLeave={() => setHoverTable(undefined)}
                 onPaneClick={() => setSelectedEdges(new Set())}
@@ -1011,6 +1352,7 @@ export function App() {
               />
             ) : null}
           </div>
+          {validation ? <ValidationDialog results={validation} onClose={() => setValidation(undefined)} /> : null}
           {relDraft && editable ? (
             <RelationDialog
               schema={schema}
@@ -1024,6 +1366,8 @@ export function App() {
             />
           ) : null}
         </div>
+      </RouterContext.Provider>
+      </GroupActionsContext.Provider>
       </EdgeActionsContext.Provider>
     </NodeActionsContext.Provider>
   );

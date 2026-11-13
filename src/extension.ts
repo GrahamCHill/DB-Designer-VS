@@ -1,17 +1,27 @@
 import * as vscode from 'vscode';
 import { ErdPanel } from './erdPanel';
-import { pickConnection, removeConnection } from './sources';
-import { chooseProvider, clearAnthropicKey, setAnthropicKey } from './ai/providers';
+import {
+  RecentEntry,
+  getSavedConnections,
+  pickConnection,
+  removeConnection,
+  removeRecent,
+  resolveRecent,
+  saveConnections,
+} from './sources';
+import { ConnectionInfo } from './introspect/index';
+import { ConnectionsView, DiagramsView, SqlFoldersView } from './sidebar';
+import { chooseProvider, clearApiKeys, setApiKey } from './ai/providers';
 import { registerTools } from './ai/tools';
 
 export function activate(context: vscode.ExtensionContext) {
-  const output = vscode.window.createOutputChannel('ERD Viewer');
+  const output = vscode.window.createOutputChannel('DB Designer');
   context.subscriptions.push(output);
 
   const reg = (id: string, fn: (...args: any[]) => unknown) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
   const isErdFile = (p: string) => /\.erd\.json$/i.test(p);
 
-  reg('erdViewer.openFromSqlFolder', async () => {
+  reg('dbDesigner.openFromSqlFolder', async () => {
     const uris = await vscode.window.showOpenDialog({
       title: 'Choose a folder of .sql files (e.g. a migrations or db folder)',
       canSelectFolders: true,
@@ -22,7 +32,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (uris?.length) await ErdPanel.open(context, output, { kind: 'sql', paths: [uris[0].fsPath] });
   });
 
-  reg('erdViewer.openFromSqlFiles', async () => {
+  reg('dbDesigner.openFromSqlFiles', async () => {
     const uris = await vscode.window.showOpenDialog({
       title: 'Choose .sql files (applied in name order)',
       canSelectFolders: false,
@@ -34,7 +44,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (uris?.length) await ErdPanel.open(context, output, { kind: 'sql', paths: uris.map((u) => u.fsPath) });
   });
 
-  reg('erdViewer.openErdFile', async () => {
+  reg('dbDesigner.openErdFile', async () => {
     const uris = await vscode.window.showOpenDialog({
       title: 'Open a shared ERD diagram',
       canSelectMany: false,
@@ -44,35 +54,35 @@ export function activate(context: vscode.ExtensionContext) {
     if (uris?.length) await ErdPanel.open(context, output, { kind: 'erd', path: uris[0].fsPath });
   });
 
-  reg('erdViewer.openFromExplorer', async (uri?: vscode.Uri, selected?: vscode.Uri[]) => {
+  reg('dbDesigner.openFromExplorer', async (uri?: vscode.Uri, selected?: vscode.Uri[]) => {
     const list = selected?.length ? selected : uri ? [uri] : [];
-    if (!list.length) return vscode.commands.executeCommand('erdViewer.openFromSqlFolder');
+    if (!list.length) return vscode.commands.executeCommand('dbDesigner.openFromSqlFolder');
     if (list.length === 1 && isErdFile(list[0].fsPath)) return ErdPanel.open(context, output, { kind: 'erd', path: list[0].fsPath });
     await ErdPanel.open(context, output, { kind: 'sql', paths: list.map((u) => u.fsPath).filter((p) => !isErdFile(p)) });
   });
 
-  reg('erdViewer.openFromDatabase', async () => {
+  reg('dbDesigner.openFromDatabase', async () => {
     const conn = await pickConnection(context.secrets);
     if (conn) await ErdPanel.open(context, output, { kind: 'db', connection: conn });
   });
 
-  reg('erdViewer.manageConnections', () => removeConnection(context.secrets));
+  reg('dbDesigner.manageConnections', () => removeConnection(context.secrets));
 
-  reg('erdViewer.newBlank', () => ErdPanel.open(context, output, { kind: 'blank', id: Date.now().toString(36) }));
+  reg('dbDesigner.newBlank', () => ErdPanel.open(context, output, { kind: 'blank', id: Date.now().toString(36) }));
 
-  reg('erdViewer.aiReview', () => {
+  reg('dbDesigner.aiReview', () => {
     const p = ErdPanel.active();
     if (!p) return vscode.window.showInformationMessage('Open an ERD diagram first, then run the AI normalisation review.');
     p.openAiPanel();
   });
-  reg('erdViewer.aiChooseProvider', () => chooseProvider());
-  reg('erdViewer.aiSetAnthropicKey', () => setAnthropicKey(context.secrets));
-  reg('erdViewer.aiClearAnthropicKey', () => clearAnthropicKey(context.secrets));
+  reg('dbDesigner.aiChooseProvider', () => chooseProvider(context.secrets));
+  reg('dbDesigner.aiSetApiKey', () => setApiKey(context.secrets));
+  reg('dbDesigner.aiClearApiKeys', () => clearApiKeys(context.secrets));
 
   // Double-clicking *.erd.json opens the diagram.
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider(
-      'erdViewer.erdFile',
+      'dbDesigner.erdFile',
       {
         openCustomDocument: (uri) => ({ uri, dispose() {} }),
         resolveCustomEditor: (doc, panel) => {
@@ -84,6 +94,49 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   registerTools(context);
+
+  // ---- Activity-bar sidebar ----------------------------------------------------
+  const diagrams = new DiagramsView(context);
+  const connections = new ConnectionsView(context.secrets, context);
+  const folders = new SqlFoldersView(context);
+  context.subscriptions.push(
+    vscode.window.createTreeView('dbDesigner.diagrams', { treeDataProvider: diagrams }),
+    vscode.window.createTreeView('dbDesigner.connections', { treeDataProvider: connections }),
+    vscode.window.createTreeView('dbDesigner.sqlFolders', { treeDataProvider: folders }),
+  );
+  reg('dbDesigner.refreshSidebar', () => {
+    diagrams.refresh();
+    connections.refresh();
+    folders.refresh();
+  });
+  reg('dbDesigner.revealDiagram', (p: ErdPanel) => p?.reveal());
+  reg('dbDesigner.openRecent', async (e: RecentEntry) => {
+    const source = await resolveRecent(context.secrets, e.source);
+    if (!source) {
+      const pick = await vscode.window.showWarningMessage(`The saved connection for "${e.title}" no longer exists.`, 'Remove from Recent');
+      if (pick) await removeRecent(context, e.key);
+      diagrams.refresh();
+      return;
+    }
+    await ErdPanel.open(context, output, source);
+  });
+  reg('dbDesigner.removeRecent', async (node?: { entry?: RecentEntry }) => {
+    if (node?.entry) await removeRecent(context, node.entry.key);
+    diagrams.refresh();
+  });
+  reg('dbDesigner.clearRecent', async () => {
+    await removeRecent(context);
+    diagrams.refresh();
+  });
+  reg('dbDesigner.openConnection', (c: ConnectionInfo) => c && ErdPanel.open(context, output, { kind: 'db', connection: c }));
+  reg('dbDesigner.removeConnectionItem', async (c: ConnectionInfo) => {
+    if (!c) return;
+    const ok = await vscode.window.showWarningMessage(`Remove the saved connection "${c.name}"?`, { modal: true }, 'Remove');
+    if (ok !== 'Remove') return;
+    const all = await getSavedConnections(context.secrets);
+    await saveConnections(context.secrets, all.filter((x) => !(x.name === c.name && x.kind === c.kind)));
+    connections.refresh();
+  });
 }
 
 export function deactivate() {}

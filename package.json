@@ -1,8 +1,8 @@
 {
-  "name": "erd-viewer",
-  "displayName": "ERD Viewer",
-  "description": "Interactive, editable ER diagrams from SQL files or a live database (PostgreSQL, SQL Server, MySQL, SQLite). PostgreSQL export, high-res image export, shareable diagrams and AI normalisation reviews.",
-  "version": "0.2.0",
+  "name": "db-designer-vs",
+  "displayName": "DB Designer VS",
+  "description": "Database designer for VS Code: interactive, editable ER diagrams from SQL files or a live database (PostgreSQL, SQL Server, MySQL, SQLite). Validated SQL export to PostgreSQL, SQL Server, MySQL or SQLite, table groups, high-res images, shareable diagrams and AI normalisation reviews.",
+  "version": "0.4.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -28,80 +28,214 @@
   "contributes": {
     "commands": [
       {
-        "command": "erdViewer.openFromSqlFolder",
+        "command": "dbDesigner.openFromSqlFolder",
         "title": "Open ERD from SQL Folder…",
-        "category": "ERD Viewer"
+        "category": "DB Designer",
+        "icon": "$(folder-opened)"
       },
       {
-        "command": "erdViewer.openFromSqlFiles",
+        "command": "dbDesigner.openFromSqlFiles",
         "title": "Open ERD from SQL Files…",
-        "category": "ERD Viewer"
+        "category": "DB Designer",
+        "icon": "$(file-code)"
       },
       {
-        "command": "erdViewer.openFromDatabase",
+        "command": "dbDesigner.openFromDatabase",
         "title": "Open ERD from Database Connection…",
-        "category": "ERD Viewer"
+        "category": "DB Designer",
+        "icon": "$(database)"
       },
       {
-        "command": "erdViewer.openErdFile",
+        "command": "dbDesigner.openErdFile",
         "title": "Open Shared Diagram (.erd.json)…",
-        "category": "ERD Viewer"
+        "category": "DB Designer",
+        "icon": "$(go-to-file)"
       },
       {
-        "command": "erdViewer.manageConnections",
+        "command": "dbDesigner.manageConnections",
         "title": "Remove Saved Connection…",
-        "category": "ERD Viewer"
+        "category": "DB Designer"
       },
       {
-        "command": "erdViewer.openFromExplorer",
+        "command": "dbDesigner.openFromExplorer",
         "title": "Open ERD",
-        "category": "ERD Viewer"
+        "category": "DB Designer"
       },
       {
-        "command": "erdViewer.newBlank",
+        "command": "dbDesigner.newBlank",
         "title": "New Blank ERD",
-        "category": "ERD Viewer"
+        "category": "DB Designer",
+        "icon": "$(new-file)"
       },
       {
-        "command": "erdViewer.aiReview",
+        "command": "dbDesigner.aiReview",
         "title": "AI: Review Normalisation of Open Diagram",
-        "category": "ERD Viewer"
+        "category": "DB Designer"
       },
       {
-        "command": "erdViewer.aiChooseProvider",
+        "command": "dbDesigner.aiChooseProvider",
         "title": "AI: Choose Provider…",
-        "category": "ERD Viewer"
+        "category": "DB Designer"
       },
       {
-        "command": "erdViewer.aiSetAnthropicKey",
-        "title": "AI: Set Anthropic API Key…",
-        "category": "ERD Viewer"
+        "command": "dbDesigner.refreshSidebar",
+        "title": "Refresh",
+        "category": "DB Designer",
+        "icon": "$(refresh)"
       },
       {
-        "command": "erdViewer.aiClearAnthropicKey",
-        "title": "AI: Remove Anthropic API Key",
-        "category": "ERD Viewer"
+        "command": "dbDesigner.revealDiagram",
+        "title": "Show Diagram",
+        "category": "DB Designer"
+      },
+      {
+        "command": "dbDesigner.openRecent",
+        "title": "Open Diagram",
+        "category": "DB Designer"
+      },
+      {
+        "command": "dbDesigner.removeRecent",
+        "title": "Remove from Recent",
+        "category": "DB Designer",
+        "icon": "$(close)"
+      },
+      {
+        "command": "dbDesigner.clearRecent",
+        "title": "Clear Recent Diagrams",
+        "category": "DB Designer",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "dbDesigner.openConnection",
+        "title": "Open ERD",
+        "category": "DB Designer",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dbDesigner.removeConnectionItem",
+        "title": "Remove Connection",
+        "category": "DB Designer",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dbDesigner.aiSetApiKey",
+        "title": "AI: Set API Key (stored encrypted)…",
+        "category": "DB Designer"
+      },
+      {
+        "command": "dbDesigner.aiClearApiKeys",
+        "title": "AI: Remove Saved API Keys…",
+        "category": "DB Designer"
       }
     ],
     "menus": {
       "explorer/context": [
         {
-          "command": "erdViewer.openFromExplorer",
+          "command": "dbDesigner.openFromExplorer",
           "when": "explorerResourceIsFolder || resourceExtname == .sql || resourceFilename =~ /.erd.json$/",
           "group": "navigation@90"
         }
       ],
       "commandPalette": [
         {
-          "command": "erdViewer.openFromExplorer",
+          "command": "dbDesigner.revealDiagram",
           "when": "false"
+        },
+        {
+          "command": "dbDesigner.openRecent",
+          "when": "false"
+        },
+        {
+          "command": "dbDesigner.removeRecent",
+          "when": "false"
+        },
+        {
+          "command": "dbDesigner.openConnection",
+          "when": "false"
+        },
+        {
+          "command": "dbDesigner.removeConnectionItem",
+          "when": "false"
+        },
+        {
+          "command": "dbDesigner.openFromExplorer",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dbDesigner.openFromSqlFolder",
+          "when": "view == dbDesigner.diagrams",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dbDesigner.openFromDatabase",
+          "when": "view == dbDesigner.diagrams",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dbDesigner.newBlank",
+          "when": "view == dbDesigner.diagrams",
+          "group": "navigation@3"
+        },
+        {
+          "command": "dbDesigner.openErdFile",
+          "when": "view == dbDesigner.diagrams",
+          "group": "1_more@1"
+        },
+        {
+          "command": "dbDesigner.openFromSqlFiles",
+          "when": "view == dbDesigner.diagrams",
+          "group": "1_more@2"
+        },
+        {
+          "command": "dbDesigner.clearRecent",
+          "when": "view == dbDesigner.diagrams",
+          "group": "2_clear"
+        },
+        {
+          "command": "dbDesigner.openFromDatabase",
+          "when": "view == dbDesigner.connections",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dbDesigner.refreshSidebar",
+          "when": "view == dbDesigner.connections || view == dbDesigner.sqlFolders",
+          "group": "navigation@9"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dbDesigner.openConnection",
+          "when": "view == dbDesigner.connections && viewItem == connection",
+          "group": "inline@1"
+        },
+        {
+          "command": "dbDesigner.removeConnectionItem",
+          "when": "view == dbDesigner.connections && viewItem == connection",
+          "group": "inline@2"
+        },
+        {
+          "command": "dbDesigner.removeConnectionItem",
+          "when": "view == dbDesigner.connections && viewItem == connection",
+          "group": "9_remove"
+        },
+        {
+          "command": "dbDesigner.removeRecent",
+          "when": "view == dbDesigner.diagrams && viewItem == recentDiagram",
+          "group": "inline"
+        },
+        {
+          "command": "dbDesigner.clearRecent",
+          "when": "view == dbDesigner.diagrams && viewItem == group-recent",
+          "group": "inline"
         }
       ]
     },
     "configuration": {
-      "title": "ERD Viewer",
+      "title": "DB Designer VS",
       "properties": {
-        "erdViewer.excludeFolders": {
+        "dbDesigner.excludeFolders": {
           "type": "array",
           "items": {
             "type": "string"
@@ -116,47 +250,59 @@
           ],
           "description": "Folder names skipped when collecting .sql files recursively. Folders starting with '.' are always skipped."
         },
-        "erdViewer.ai.provider": {
+        "dbDesigner.ai.provider": {
           "type": "string",
           "enum": [
             "vscode",
             "anthropic",
+            "openai",
             "ollama"
           ],
           "default": "vscode",
           "enumDescriptions": [
             "A chat model available in VS Code (GitHub Copilot or another installed provider). No API key needed.",
-            "Anthropic Claude API with your API key (stored in Secret Storage; set it with \"ERD Viewer: AI: Set Anthropic API Key\").",
+            "Anthropic Claude API. The key is stored encrypted in VS Code Secret Storage.",
+            "Groq, OpenAI, OpenRouter, LM Studio or any OpenAI-compatible endpoint (see dbDesigner.ai.openaiBaseUrl). The key is stored encrypted in VS Code Secret Storage.",
             "A local Ollama server, so the schema never leaves your machine."
           ],
           "description": "Which language model the AI normalisation review uses. Only the schema (tables, columns, keys) is sent, never row data."
         },
-        "erdViewer.ai.vscodeModel": {
+        "dbDesigner.ai.vscodeModel": {
           "type": "string",
           "default": "",
           "description": "Model family for the VS Code provider (e.g. \"gpt-4o\", \"claude-sonnet-4\"). Empty = ask the first time."
         },
-        "erdViewer.ai.anthropicModel": {
+        "dbDesigner.ai.anthropicModel": {
           "type": "string",
           "default": "claude-opus-5-5",
           "description": "Claude model id for the Anthropic provider."
         },
-        "erdViewer.ai.ollamaUrl": {
+        "dbDesigner.ai.ollamaUrl": {
           "type": "string",
           "default": "http://localhost:11434",
           "description": "Base URL of the Ollama server."
         },
-        "erdViewer.ai.ollamaModel": {
+        "dbDesigner.ai.ollamaModel": {
           "type": "string",
           "default": "",
           "description": "Ollama model name (e.g. \"qwen2.5-coder:14b\"). Empty = choose from installed models the first time."
+        },
+        "dbDesigner.ai.openaiBaseUrl": {
+          "type": "string",
+          "default": "https://api.groq.com/openai/v1",
+          "description": "Base URL of the OpenAI-compatible API (Groq by default). Examples: https://api.openai.com/v1, https://openrouter.ai/api/v1, http://localhost:1234/v1 (LM Studio)."
+        },
+        "dbDesigner.ai.openaiModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model for the OpenAI-compatible provider. Empty = the endpoint preset default (Groq: llama-3.3-70b-versatile)."
         }
       }
     },
     "customEditors": [
       {
-        "viewType": "erdViewer.erdFile",
-        "displayName": "ERD Viewer",
+        "viewType": "dbDesigner.erdFile",
+        "displayName": "DB Designer",
         "selector": [
           {
             "filenamePattern": "*.erd.json"
@@ -167,13 +313,13 @@
     ],
     "languageModelTools": [
       {
-        "name": "erd-viewer_getSchema",
+        "name": "db-designer_getSchema",
         "displayName": "Get ERD diagram schema",
-        "toolReferenceName": "erdSchema",
+        "toolReferenceName": "dbSchema",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy)",
-        "userDescription": "Read the tables, columns and foreign keys of the ERD diagram that is open in ERD Viewer.",
-        "modelDescription": "Returns the schema of the ER diagram currently open in the ERD Viewer extension (including unsaved edits), as PostgreSQL DDL (default) or compact JSON. Use it before reviewing or changing the database design, e.g. for normalisation advice.",
+        "userDescription": "Read the tables, columns and foreign keys of the ERD diagram that is open in DB Designer.",
+        "modelDescription": "Returns the schema of the ER diagram currently open in the DB Designer extension (including unsaved edits), as PostgreSQL DDL (default) or compact JSON. Use it before reviewing or changing the database design, e.g. for normalisation advice.",
         "tags": [
           "database",
           "erd",
@@ -194,13 +340,13 @@
         }
       },
       {
-        "name": "erd-viewer_applyChanges",
+        "name": "db-designer_applyChanges",
         "displayName": "Apply changes to ERD diagram",
-        "toolReferenceName": "erdApply",
+        "toolReferenceName": "dbApply",
         "canBeReferencedInPrompt": true,
         "icon": "$(edit)",
         "userDescription": "Apply schema changes (add/split tables, columns, keys, foreign keys) to the open ERD diagram as an undoable draft.",
-        "modelDescription": "Applies a list of schema operations to the ER diagram open in ERD Viewer, as one undoable draft edit that the user confirms. Call erd-viewer_getSchema first and use exact, schema-qualified table names. Operations: add_table (table, column_defs), drop_table, rename_table (new_name), add_column (table, column_defs with one entry), drop_column (column), rename_column (column, new_name), alter_column (column + type/nullable/unique/default), set_primary_key (columns), add_foreign_key (columns, ref_table, ref_columns, on_delete), drop_foreign_key (columns). The user can afterwards export the result as a PostgreSQL migration.",
+        "modelDescription": "Applies a list of schema operations to the ER diagram open in DB Designer, as one undoable draft edit that the user confirms. Call db-designer_getSchema first and use exact, schema-qualified table names. Operations: add_table (table, column_defs), drop_table, rename_table (new_name), add_column (table, column_defs with one entry), drop_column (column), rename_column (column, new_name), alter_column (column + type/nullable/unique/default), set_primary_key (columns), add_foreign_key (columns, ref_table, ref_columns, on_delete), drop_foreign_key (columns). The user can afterwards export the result as a PostgreSQL migration.",
         "tags": [
           "database",
           "erd",
@@ -336,6 +482,45 @@
           }
         }
       }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dbDesigner",
+          "title": "DB Designer",
+          "icon": "media/erd.svg"
+        }
+      ]
+    },
+    "views": {
+      "dbDesigner": [
+        {
+          "id": "dbDesigner.diagrams",
+          "name": "Diagrams"
+        },
+        {
+          "id": "dbDesigner.connections",
+          "name": "Database Connections"
+        },
+        {
+          "id": "dbDesigner.sqlFolders",
+          "name": "SQL Folders in Workspace"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "dbDesigner.diagrams",
+        "contents": "Open an entity-relationship diagram from SQL migration files, a live database, or a shared .erd.json file.\n[$(folder-opened) Open SQL Folder](command:dbDesigner.openFromSqlFolder)\n[$(database) Connect to a Database](command:dbDesigner.openFromDatabase)\n[$(go-to-file) Open Shared Diagram](command:dbDesigner.openErdFile)\n[$(new-file) New Blank Diagram](command:dbDesigner.newBlank)"
+      },
+      {
+        "view": "dbDesigner.connections",
+        "contents": "No saved connections yet.\n[$(add) Add Connection](command:dbDesigner.openFromDatabase)\nPostgreSQL, SQL Server, MySQL/MariaDB and SQLite are supported. Connection strings are kept in VS Code Secret Storage."
+      },
+      {
+        "view": "dbDesigner.sqlFolders",
+        "contents": "No .sql files found in this workspace.\n[$(folder-opened) Open SQL Folder…](command:dbDesigner.openFromSqlFolder)"
+      }
     ]
   },
   "scripts": {
@@ -344,11 +529,13 @@
     "typecheck": "tsc --noEmit -p .",
     "test": "node esbuild.mjs --tests && node --test \"dist-test/*.test.js\"",
     "smoke": "node esbuild.mjs && node test/activate-smoke.js",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies"
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies",
+    "test:engines": "esbuild test/dialect-integration.ts --bundle --platform=node --outfile=dist-test/dialect-integration.js --external:pg-native --external:cloudflare:sockets --log-level=warning && node dist-test/dialect-integration.js"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
     "@dagrejs/dagre": "^3.1.3",
+    "@electric-sql/pglite": "^0.5.16",
     "@types/mssql": "^12.3.0",
     "@types/node": "^20.19.43",
     "@types/pg": "^8.23.1",
@@ -369,6 +556,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/GrahamCHill/ERD-Viewer.git"
+    "url": "https://github.com/GrahamCHill/DB-Designer-VS.git"
   }
 }

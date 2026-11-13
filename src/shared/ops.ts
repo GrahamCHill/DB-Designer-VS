@@ -268,6 +268,66 @@ export function applyOps(s: Schema, ops: SchemaOp[], defaultSchema = 'public'): 
   return errors;
 }
 
+/** Key aliases models commonly use instead of the documented names. */
+const KEY_ALIASES: Record<string, string> = {
+  type: 'op',
+  operation: 'op',
+  action: 'op',
+  kind: 'op',
+  table_name: 'table',
+  tablename: 'table',
+  target_table: 'table',
+  column_name: 'column',
+  columnname: 'column',
+  newname: 'new_name',
+  rename_to: 'new_name',
+  to: 'new_name',
+  data_type: 'type_',
+  datatype: 'type_',
+  column_type: 'type_',
+  references_table: 'ref_table',
+  referenced_table: 'ref_table',
+  reftable: 'ref_table',
+  references: 'ref_table',
+  references_columns: 'ref_columns',
+  referenced_columns: 'ref_columns',
+  refcolumns: 'ref_columns',
+  referenced_column: 'ref_columns',
+  ref_column: 'ref_columns',
+  columns_def: 'column_defs',
+  columndefs: 'column_defs',
+  definitions: 'column_defs',
+  ondelete: 'on_delete',
+  onupdate: 'on_update',
+  primarykey: 'primary_key',
+  is_nullable: 'nullable',
+  not_null: 'not_null',
+};
+
+/** Accept {"add_column": {...}} wrappers, camelCase / alias keys and "type" used for the op name. */
+function normaliseKeys(raw: Record<string, unknown>): Record<string, unknown> {
+  let o = raw;
+  const keys = Object.keys(o);
+  if (keys.length === 1 && (OP_KINDS as readonly string[]).includes(keys[0].toLowerCase()) && o[keys[0]] && typeof o[keys[0]] === 'object')
+    o = { op: keys[0], ...(o[keys[0]] as Record<string, unknown>) };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    const snake = k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+    const mapped = KEY_ALIASES[snake] ?? KEY_ALIASES[snake.replace(/_/g, '')] ?? snake;
+    if (mapped === 'op' && !(OP_KINDS as readonly string[]).includes(String(v).toLowerCase().replace(/[\s-]+/g, '_'))) {
+      // "type" that is a data type, not an operation name
+      out.type = v;
+      continue;
+    }
+    if (mapped === 'type_') out.type = v;
+    else if (mapped === 'not_null') out.nullable = v === true ? false : v === false ? true : v;
+    else if (!(mapped in out)) out[mapped] = v;
+  }
+  if (typeof out.ref_columns === 'string') out.ref_columns = [out.ref_columns];
+  if (typeof out.columns === 'string') out.columns = [out.columns];
+  return out;
+}
+
 /** Validate and normalise loosely-typed operations coming from a model or tool call. */
 export function sanitizeOps(raw: unknown): { ops: SchemaOp[]; problems: string[] } {
   const ops: SchemaOp[] = [];
@@ -292,8 +352,8 @@ export function sanitizeOps(raw: unknown): { ops: SchemaOp[]; problems: string[]
   };
   raw.forEach((r, i) => {
     if (!r || typeof r !== 'object') return problems.push(`#${i + 1}: not an object`);
-    const o = r as Record<string, unknown>;
-    const kind = str(o.op);
+    const o = normaliseKeys(r as Record<string, unknown>);
+    const kind = str(o.op)?.toLowerCase().replace(/[\s-]+/g, '_');
     const table = str(o.table);
     if (!kind || !(OP_KINDS as readonly string[]).includes(kind)) return problems.push(`#${i + 1}: unknown op "${o.op}"`);
     if (!table) return problems.push(`#${i + 1}: missing table`);

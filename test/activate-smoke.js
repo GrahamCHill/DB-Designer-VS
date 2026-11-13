@@ -4,13 +4,22 @@ const Module = require('module');
 const registered = [];
 const editors = [];
 const tools = [];
+const views = [];
+class EventEmitter { constructor() { this.l = []; this.event = (f) => (this.l.push(f), { dispose() {} }); } fire(v) { this.l.forEach((f) => f(v)); } dispose() {} }
+const noop = () => ({ dispose() {} });
 const stub = {
   window: {
     createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
     registerCustomEditorProvider: (id) => (editors.push(id), { dispose() {} }),
+    createTreeView: (id) => (views.push(id), { dispose() {} }),
   },
   commands: { registerCommand: (id) => (registered.push(id), { dispose() {} }) },
-  workspace: { getConfiguration: () => ({ get: () => [] }) },
+  workspace: {
+    getConfiguration: () => ({ get: () => [] }),
+    createFileSystemWatcher: () => ({ onDidCreate: noop, onDidDelete: noop, onDidChange: noop, dispose() {} }),
+    onDidChangeWorkspaceFolders: noop,
+  },
+  EventEmitter,
   lm: { registerTool: (name) => (tools.push(name), { dispose() {} }) },
 };
 const orig = Module._load;
@@ -18,7 +27,7 @@ Module._load = function (req, ...rest) {
   return req === 'vscode' ? stub : orig.call(this, req, ...rest);
 };
 const ext = require('../dist/extension.js');
-ext.activate({ subscriptions: [], secrets: {}, globalState: {}, extensionUri: {} });
+ext.activate({ subscriptions: [], secrets: { onDidChange: noop }, globalState: { get: (k, d) => d }, extensionUri: {} });
 const pkg = require('../package.json');
 const fail = (m) => (console.error(m), process.exit(1));
 const missing = pkg.contributes.commands.map((c) => c.command).filter((c) => !registered.includes(c));
@@ -27,4 +36,6 @@ const missingEditors = pkg.contributes.customEditors.map((e) => e.viewType).filt
 if (missingEditors.length) fail(`custom editors not registered: ${missingEditors}`);
 const missingTools = pkg.contributes.languageModelTools.map((t) => t.name).filter((n) => !tools.includes(n));
 if (missingTools.length) fail(`tools not registered: ${missingTools}`);
-console.log(`OK: ${registered.length} commands, ${editors.length} custom editor, ${tools.length} LM tools registered`);
+const missingViews = Object.values(pkg.contributes.views).flat().map((v) => v.id).filter((v) => !views.includes(v));
+if (missingViews.length) fail(`views without a provider: ${missingViews}`);
+console.log(`OK: ${views.length} sidebar views, ${registered.length} commands, ${editors.length} custom editor, ${tools.length} LM tools registered`);

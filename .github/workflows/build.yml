@@ -1,4 +1,4 @@
-name: Build ERD Viewer
+name: Build DB Designer
 
 on:
   push:
@@ -31,9 +31,47 @@ jobs:
       - run: npm test
       - run: npm run smoke
 
+  engines:
+    name: Exported SQL on real engines
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ['55999:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: erdtest
+        ports: ['53306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -uroot -perdtest" --health-interval 5s --health-timeout 5s --health-retries 30
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: Erd_Test_Pw_2026!
+        ports: ['51433:1433']
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Erd_Test_Pw_2026!' -Q 'SELECT 1'"
+          --health-interval 10s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run test:engines
+
   package:
     name: Package VSIX
-    needs: test
+    needs: [test, engines]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -53,13 +91,13 @@ jobs:
             echo "Release tag $GITHUB_REF_NAME must match package version v$version." >&2
             exit 1
           fi
-          filename="erd-viewer-$version.vsix"
+          filename="db-designer-vs-$version.vsix"
           npm run package -- --out "$filename"
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: erd-viewer-vsix
+          name: db-designer-vs-vsix
           path: ${{ steps.vsix.outputs.filename }}
           if-no-files-found: error
     outputs:
@@ -86,7 +124,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
-          name: erd-viewer-vsix
+          name: db-designer-vs-vsix
       - name: Publish VSIX
         shell: bash
         env:

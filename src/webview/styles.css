@@ -1023,3 +1023,180 @@ textarea:focus {
 .link:hover {
   text-decoration: underline;
 }
+
+/* ---------- validation dialog ---------- */
+.val-row {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.val-row.ok {
+  border-left-color: var(--new);
+}
+.val-row.bad {
+  border-left-color: var(--danger);
+}
+.val-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.val-mark {
+  font-weight: 700;
+}
+.val-row.ok .val-mark {
+  color: var(--new);
+}
+.val-row.bad .val-mark {
+  color: var(--danger);
+}
+.val-notes {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+/* ---------- table groups ---------- */
+.react-flow__node-tablegroup {
+  pointer-events: none !important;
+}
+.erd-group {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border-radius: 12px;
+  border: 1.5px solid rgba(var(--group-color-rgb), 0.45);
+  background: rgba(var(--group-color-rgb), 0.04);
+  position: relative;
+}
+.erd-group.nested {
+  border-style: dashed;
+  background: rgba(var(--group-color-rgb), 0.06);
+}
+.erd-group.selected {
+  box-shadow: 0 0 0 2px var(--group-color), 0 0 24px rgba(var(--group-color-rgb), 0.2);
+}
+.erd-group-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 10px 0 12px;
+  border-radius: 10px 10px 0 0;
+  background: rgba(var(--group-color-rgb), 0.09);
+  border-bottom: 1px solid rgba(var(--group-color-rgb), 0.2);
+  cursor: grab;
+  pointer-events: all;
+  user-select: none;
+}
+.erd-group-header:active {
+  cursor: grabbing;
+}
+.erd-group-tag {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--group-color);
+  opacity: 0.85;
+}
+.erd-group-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--group-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.erd-group-depth,
+.erd-group-count {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--group-color);
+  background: rgba(var(--group-color-rgb), 0.15);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+.erd-group-edit {
+  background: none;
+  border: none;
+  color: var(--group-color);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: all;
+}
+.erd-group-header:hover .erd-group-edit,
+.erd-group.selected .erd-group-edit {
+  opacity: 0.8;
+}
+.erd-group-edit:hover {
+  opacity: 1 !important;
+  background: rgba(var(--group-color-rgb), 0.2);
+}
+.erd-group-editor {
+  position: absolute;
+  top: 38px;
+  left: 8px;
+  width: 280px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  pointer-events: all;
+}
+.erd-group-swatches {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.swatch.on {
+  border-color: var(--fg);
+}
+.erd-group-editor-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.react-flow__node-tablegroup .react-flow__resize-control {
+  pointer-events: all;
+}
+.erd-group-resize-handle.react-flow__resize-control.handle {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--group-color);
+  border: none;
+}
+.erd-group-resize-line.react-flow__resize-control.line {
+  border-color: var(--group-color);
+}
+.standalone .erd-group-edit {
+  display: none;
+}

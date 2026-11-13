@@ -5,15 +5,33 @@
 <title>ERD harness</title>
 <link rel="stylesheet" href="../../dist/webview.css" />
 <script>
-  // Stand-in for the VS Code webview API: answers "ready" with the load message, records the rest.
+  // Stand-in for the VS Code webview API: answers "ready" with the load message, fakes AI replies, records the rest.
   window.__posted = [];
+  const reply = (m) => setTimeout(() => window.postMessage(m, '*'), 0);
   window.acquireVsCodeApi = () => ({
     postMessage(m) {
       window.__posted.push(m);
-      if (m.type === 'ready') setTimeout(() => window.postMessage(window.__ERD_LOAD__, '*'), 0);
+      if (m.type === 'ready') reply({ ...window.__ERD_LOAD__, aiProvider: 'Harness (canned review)' });
+      else if (m.type === 'aiReview') setTimeout(() => reply({ type: 'aiResult', review: window.__ERD_AI__ }), 800);
+      else if (m.type === 'saveImage') { window.__image = { format: m.format, length: m.dataUrl.length, dataUrl: m.dataUrl }; reply({ type: 'exported', path: 'harness/diagram.' + m.format }); }
       else console.log('[host]', m.type, m);
     },
   });
+  window.__ERD_AI__ = {
+    model: 'harness',
+    summary: 'Contracts repeat document file ids in five columns; tender numbers are free text in several tables.',
+    suggestions: [
+      { id: 's1', title: 'Move contract document links into one table', severity: 'high', category: '1NF', tables: ['app.contracts', 'app.files'],
+        explanation: 'pdf_file_id, sla_file_id, misc_file_id … are a repeating group. A contract_files table with a kind column supports any number of documents. Data must be copied into the new table before the old columns are dropped.',
+        operations: [
+          { op: 'add_table', table: 'app.contract_files', columns: [ { name: 'contract_id', type: 'uuid', nullable: false }, { name: 'file_id', type: 'uuid', nullable: false }, { name: 'kind', type: 'text', nullable: false } ] },
+          { op: 'set_primary_key', table: 'app.contract_files', columns: ['contract_id', 'kind'] },
+          { op: 'add_foreign_key', table: 'app.contract_files', columns: ['contract_id'], ref_table: 'app.contracts', ref_columns: ['id'], on_delete: 'CASCADE' },
+          { op: 'add_foreign_key', table: 'app.contract_files', columns: ['file_id'], ref_table: 'app.files', ref_columns: ['id'] },
+          { op: 'drop_column', table: 'app.contracts', column: 'misc_file_id' } ] },
+      { id: 's2', title: 'Store dates as dates', severity: 'medium', category: 'types', tables: ['app.users'], explanation: 'Advice only.', operations: [] },
+    ],
+  };
 </script>
 <script src="data.js"></script>
 </head>

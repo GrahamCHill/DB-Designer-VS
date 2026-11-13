@@ -17,7 +17,7 @@ const configs = args.has('--tests')
   ? [
       {
         ...common,
-        entryPoints: ['test/parser.test.ts', 'test/export.test.ts', 'test/introspect.test.ts'],
+        entryPoints: ['test/parser.test.ts', 'test/export.test.ts', 'test/introspect.test.ts', 'test/ops.test.ts'],
         outdir: 'dist-test',
         external: ['pg-native', 'cloudflare:sockets'],
         platform: 'node',

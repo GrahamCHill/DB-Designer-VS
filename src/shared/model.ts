@@ -103,6 +103,27 @@ export function fkColumnIds(schema: Schema): Set<string> {
   return out;
 }
 
+/** A diagram saved to share with others (`*.erd.json`). */
+export interface ErdFile {
+  format: 'erd-viewer';
+  version: 1;
+  title: string;
+  savedAt: string;
+  /** Where the diagram originally came from (informational). */
+  source?: string;
+  schema: Schema;
+  layout: Layout;
+  hiddenSchemas?: string[];
+}
+
+export function isErdFile(x: unknown): x is ErdFile {
+  const o = x as ErdFile;
+  return !!o && o.format === 'erd-viewer' && !!o.schema && Array.isArray(o.schema.tables);
+}
+
+/** How the webview is hosted. `standalone` = exported HTML opened in a browser (view-only). */
+export type ViewMode = 'extension' | 'standalone';
+
 /** Messages exchanged between the extension host and the webview. */
 export type HostToWebview =
   | {
@@ -114,8 +135,19 @@ export type HostToWebview =
       layout: Layout;
       warnings: string[];
       readOnlySource: boolean;
+      mode?: ViewMode;
+      /** Source is an .erd.json file that can be saved in place. */
+      canSaveFile?: boolean;
+      hiddenSchemas?: string[];
+      aiProvider?: string;
     }
-  | { type: 'exported'; path: string };
+  | { type: 'exported'; path: string }
+  | { type: 'saved' }
+  | { type: 'aiResult'; review: import('./ai').AiReview }
+  | { type: 'aiError'; message: string }
+  | { type: 'aiProvider'; label: string }
+  | { type: 'openAi' }
+  | { type: 'applyOps'; requestId: string; ops: import('./ops').SchemaOp[]; description?: string };
 
 export type WebviewToHost =
   | { type: 'ready' }
@@ -124,4 +156,11 @@ export type WebviewToHost =
   | { type: 'reload' }
   | { type: 'discard' }
   | { type: 'info'; message: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'saveImage'; format: 'png' | 'svg'; dataUrl: string }
+  | { type: 'share'; kind: 'erd' | 'html'; file: ErdFile }
+  | { type: 'saveFile'; file: ErdFile }
+  | { type: 'aiReview'; request: import('./ai').ReviewRequest }
+  | { type: 'aiCancel' }
+  | { type: 'aiChooseProvider' }
+  | { type: 'opsApplied'; requestId: string; errors: string[] };

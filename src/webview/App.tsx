@@ -9,22 +9,31 @@ import {
   MiniMap,
   NodeChange,
   ReactFlow,
+  ViewportPortal,
   applyNodeChanges,
   useReactFlow,
 } from '@xyflow/react';
 import {
   Column,
+  ErdFile,
   HostToWebview,
   Layout,
   Position,
   Schema,
   Table,
+  ViewMode,
   WebviewToHost,
   cloneSchema,
   emptySchema,
   newId,
+  qualifiedName,
   tableKey,
 } from '../shared/model';
+import { SchemaOp, applyOps } from '../shared/ops';
+import { AiSuggestion } from '../shared/ai';
+import { RelationDialog, RelationDraft } from './RelationDialog';
+import { AiPanel, AiState } from './AiPanel';
+import { Box, DARK, LIGHT, boxFor, edgeSides, renderDiagram } from './exportImage';
 import { NodeActions, NodeActionsContext, TableNode, TableNodeData, TableNodeType } from './TableNode';
 import { EdgeActionsContext, EdgeMarkers, RelationEdge, RelationEdgeType } from './RelationEdge';
 import { Mutate, TableEditor, addColumnTo, newColumn } from './TableEditor';
@@ -65,6 +74,8 @@ interface Meta {
   sourceLabel: string;
   warnings: string[];
   readOnlySource: boolean;
+  mode: ViewMode;
+  canSaveFile: boolean;
 }
 
 interface History {
@@ -82,6 +93,16 @@ function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): b
   const ka = Object.keys(a);
   if (ka.length !== Object.keys(b).length) return false;
   return ka.every((k) => a[k] === b[k]);
+}
+
+/** Schema new tables go into when an operation does not name one. */
+function defaultSchemaOf(s: Schema): string {
+  if (s.dialect === 'mssql') return 'dbo';
+  if (s.dialect === 'mysql' || s.dialect === 'sqlite') return '';
+  if (!s.tables.length || s.tables.some((t) => t.schema === 'public')) return 'public';
+  const counts = new Map<string, number>();
+  for (const t of s.tables) counts.set(t.schema, (counts.get(t.schema) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
 }
 
 const relIdOf = (edgeId: string) => edgeId.split('::')[0];
@@ -102,11 +123,24 @@ export function App() {
   const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set());
   const [editor, setEditor] = useState<{ tableId: string; columnId?: string; nonce: number }>();
   const [hiddenSchemas, setHiddenSchemas] = useState<Set<string>>(new Set());
-  const [menu, setMenu] = useState<'export' | 'schemas' | 'warnings' | undefined>();
+  const [menu, setMenu] = useState<'export' | 'share' | 'schemas' | 'warnings' | undefined>();
   const [search, setSearch] = useState('');
   const [searchIdx, setSearchIdx] = useState(0);
   const [toast, setToast] = useState<string>();
+  const [relDraft, setRelDraft] = useState<RelationDraft>();
+  const [aiOpen, setAiOpen] = useState(false);
+  const [ai, setAi] = useState<AiState>({ loading: false, applied: {} });
+  const [aiProvider, setAiProvider] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [imageTheme, setImageTheme] = useState<'light' | 'dark'>(() => {
+    try {
+      return (localStorage.getItem('erd.imageTheme') as 'light' | 'dark') || 'light';
+    } catch {
+      return 'light';
+    }
+  });
   const firstLoad = useRef(true);
+  const editable = meta?.mode !== 'standalone';
 
   const setSchema = useCallback((s: Schema) => {
     schemaRef.current = s;
@@ -120,18 +154,22 @@ export function App() {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
 
+  const currentLayout = useCallback((): Layout => {
+    const layout: Layout = {};
+    for (const t of schemaRef.current.tables) {
+      const p = posRef.current[t.id];
+      if (p) layout[tableKey(t)] = { x: Math.round(p.x), y: Math.round(p.y) };
+    }
+    return layout;
+  }, []);
+
   const saveTimer = useRef<number>();
   const scheduleSave = useCallback(() => {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      const layout: Layout = {};
-      for (const t of schemaRef.current.tables) {
-        const p = posRef.current[t.id];
-        if (p) layout[tableKey(t)] = { x: Math.round(p.x), y: Math.round(p.y) };
-      }
-      post({ type: 'saveState', layout, working: schemaRef.current, dirty: dirtyRef.current });
+      post({ type: 'saveState', layout: currentLayout(), working: schemaRef.current, dirty: dirtyRef.current });
     }, 400);
-  }, []);
+  }, [currentLayout]);
 
   // ---- mutations with undo/redo ----------------------------------------
 
@@ -203,7 +241,15 @@ export function App() {
     const onMsg = (e: MessageEvent<HostToWebview>) => {
       const m = e.data;
       if (m.type === 'load') {
-        setMeta({ title: m.title, sourceLabel: m.sourceLabel, warnings: m.warnings, readOnlySource: m.readOnlySource });
+        setMeta({
+          title: m.title,
+          sourceLabel: m.sourceLabel,
+          warnings: m.warnings,
+          readOnlySource: m.readOnlySource,
+          mode: m.mode ?? 'extension',
+          canSaveFile: !!m.canSaveFile,
+        });
+        if (m.aiProvider) setAiProvider(m.aiProvider);
         setBaseline(m.baseline);
         setSchema(m.working);
         history.current = { past: [], future: [], lastTime: 0 };
@@ -220,23 +266,43 @@ export function App() {
         posRef.current = pos;
         if (firstLoad.current) {
           const schemas = new Set(m.working.tables.map((t) => t.schema));
-          const hide = m.readOnlySource ? [...schemas].filter((s) => INTERNAL_SCHEMAS.has(s)) : [];
+          const hide = m.hiddenSchemas ?? (m.readOnlySource && m.mode !== 'standalone' ? [...schemas].filter((s) => INTERNAL_SCHEMAS.has(s)) : []);
           setHiddenSchemas(hide.length < schemas.size ? new Set(hide) : new Set());
         }
         setNodes([]);
-        if (known === 0) scheduleSave();
+        if (known === 0 && m.mode !== 'standalone') scheduleSave();
         if (firstLoad.current) {
           firstLoad.current = false;
           setTimeout(() => rf.fitView({ padding: 0.08, maxZoom: 1 }), 80);
         }
       } else if (m.type === 'exported') {
-        setToast(`Exported to ${m.path}`);
+        setToast(`Saved ${m.path}`);
+      } else if (m.type === 'saved') {
+        setToast('Diagram saved');
+      } else if (m.type === 'aiResult') {
+        setAi({ loading: false, review: m.review, applied: {} });
+      } else if (m.type === 'aiError') {
+        setAi((a) => ({ ...a, loading: false, error: m.message }));
+      } else if (m.type === 'aiProvider') {
+        setAiProvider(m.label);
+      } else if (m.type === 'openAi') {
+        setEditor(undefined);
+        setAiOpen(true);
+      } else if (m.type === 'applyOps') {
+        // An agent (via the VS Code language model tools) asked to change the diagram.
+        let errors: string[] = [];
+        mutate((s) => {
+          errors = applyOps(s, m.ops, defaultSchemaOf(s));
+        });
+        const n = m.ops.length - errors.length;
+        setToast(`${m.description ? m.description + ': ' : ''}applied ${n} change${n === 1 ? '' : 's'}${errors.length ? `, ${errors.length} failed` : ''}. Ctrl+Z to undo.`);
+        post({ type: 'opsApplied', requestId: m.requestId, errors });
       }
     };
     window.addEventListener('message', onMsg);
     post({ type: 'ready' });
     return () => window.removeEventListener('message', onMsg);
-  }, [rf, setSchema, scheduleSave]);
+  }, [rf, setSchema, scheduleSave, mutate]);
 
   useEffect(() => {
     if (!toast) return;
@@ -353,22 +419,11 @@ export function App() {
       const childT = tableById.get(r.fromTable);
       const parentT = tableById.get(r.toTable);
       if (!childT || !parentT) continue;
-      const pw = parent.measured?.width ?? NODE_WIDTH;
-      const cw = child.measured?.width ?? NODE_WIDTH;
-      const pc = parent.position.x + pw / 2;
-      const cc = child.position.x + cw / 2;
-      let sSide: 'L' | 'R';
-      let tSide: 'L' | 'R';
-      if (r.toTable === r.fromTable || Math.abs(pc - cc) < Math.min(pw, cw) * 0.75) {
-        sSide = 'R';
-        tSide = 'R';
-      } else if (pc < cc) {
-        sSide = 'R';
-        tSide = 'L';
-      } else {
-        sSide = 'L';
-        tSide = 'R';
-      }
+      const { s: sSide, t: tSide } = edgeSides(
+        boxFor(parentT, parent.position, parent.measured),
+        boxFor(childT, child.position, child.measured),
+        r.toTable === r.fromTable,
+      );
       const fromNames = r.fromColumns.map((id) => childT.columns.find((c) => c.id === id));
       const toNames = r.toColumns.map((id) => parentT.columns.find((c) => c.id === id));
       // 1:1 when the FK columns are themselves unique / the whole PK.
@@ -456,20 +511,22 @@ export function App() {
       const aKey = ca.pk || ca.unique;
       const bKey = cb.pk || cb.unique;
       if (aKey && !bKey) [child, parent] = [parent, child];
-      mutate((s) => {
-        s.relations = s.relations.filter((r) => !(r.fromTable === child.t.id && r.fromColumns.length === 1 && r.fromColumns[0] === child.c.id));
-        s.relations.push({
-          id: newId('r'),
-          fromTable: child.t.id,
-          fromColumns: [child.c.id],
-          toTable: parent.t.id,
-          toColumns: [parent.c.id],
-        });
-      });
-      if (child.c.type && parent.c.type && child.c.type.replace(/serial/, 'int') !== parent.c.type.replace(/serial/, 'int'))
-        setToast(`Note: ${child.t.name}.${child.c.name} (${child.c.type}) references ${parent.t.name}.${parent.c.name} (${parent.c.type}) — types differ.`);
+      // Confirm direction, cardinality and fixes (unique key, matching type) in the dialog.
+      setRelDraft({ childTable: child.t.id, childColumn: child.c.id, parentTable: parent.t.id, parentColumn: parent.c.id });
     },
-    [tableById, mutate],
+    [tableById],
+  );
+
+  /** Apply schema operations as one undoable step; returns per-operation errors. */
+  const runOps = useCallback(
+    (ops: SchemaOp[]): string[] => {
+      let errors: string[] = [];
+      mutate((s) => {
+        errors = applyOps(s, ops, defaultSchemaOf(s));
+      });
+      return errors;
+    },
+    [mutate],
   );
 
   const isValidConnection = useCallback(
@@ -481,7 +538,10 @@ export function App() {
 
   const nodeActions: NodeActions = useMemo(
     () => ({
-      edit: (tableId, columnId) => setEditor({ tableId, columnId, nonce: Date.now() }),
+      edit: (tableId, columnId) => {
+        setAiOpen(false);
+        setEditor({ tableId, columnId, nonce: Date.now() });
+      },
       addColumn: (tableId) => {
         let id: string | undefined;
         mutate((s) => {
@@ -589,6 +649,88 @@ export function App() {
     post({ type: 'export', mode, schema: schemaRef.current, baseline, schemas });
   };
 
+  const exportImage = async (format: 'png' | 'svg') => {
+    setMenu(undefined);
+    setToast(`Rendering ${format.toUpperCase()}…`);
+    setExporting(true);
+    try {
+      await new Promise((r) => setTimeout(r, 30));
+      // Draw every visible table (also ones scrolled off-screen) from the model + positions.
+      const measured = new Map(rf.getNodes().map((n) => [n.id, n.measured]));
+      const boxes = new Map<string, Box>();
+      for (const t of visibleTables) {
+        const pos = posRef.current[t.id];
+        if (pos) boxes.set(t.id, boxFor(t, pos, measured.get(t.id)));
+      }
+      const img = await renderDiagram(
+        {
+          tables: visibleTables,
+          relations: schemaRef.current.relations,
+          boxes,
+          palette: imageTheme === 'light' ? LIGHT : DARK,
+          title: meta?.title,
+        },
+        format,
+      );
+      post({ type: 'saveImage', format, dataUrl: img.dataUrl });
+      const mb = (img.bytes / 1048576).toFixed(1);
+      setToast(
+        format === 'png'
+          ? `PNG ${img.width.toLocaleString()} × ${img.height.toLocaleString()} px at ${img.scale}× (${mb} MB)${img.scale < 2 ? '. Use SVG for unlimited zoom' : ''}`
+          : `SVG ${mb} MB. Vector, so it stays sharp at any zoom`,
+      );
+    } catch (e) {
+      setToast(`Image export failed: ${(e as Error).message}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const erdFile = (): ErdFile => ({
+    format: 'erd-viewer',
+    version: 1,
+    title: meta?.title ?? 'Diagram',
+    savedAt: new Date().toISOString(),
+    schema: schemaRef.current,
+    layout: currentLayout(),
+    hiddenSchemas: hiddenSchemas.size ? [...hiddenSchemas] : undefined,
+  });
+
+  const share = (kind: 'erd' | 'html') => {
+    setMenu(undefined);
+    post({ type: 'share', kind, file: erdFile() });
+  };
+
+  const saveFile = () => post({ type: 'saveFile', file: erdFile() });
+
+  const runAi = ({ focus, selectedOnly }: { focus: string; selectedOnly: boolean }) => {
+    setAi({ loading: true, applied: {}, review: undefined });
+    const schemas = hiddenSchemas.size ? allSchemas.filter((s) => !hiddenSchemas.has(s)) : undefined;
+    post({
+      type: 'aiReview',
+      request: { schema: schemaRef.current, schemas, tableIds: selectedOnly && selectedTable ? [selectedTable] : undefined, focus },
+    });
+  };
+
+  const applySuggestion = (s: AiSuggestion) => {
+    const errors = runOps(s.operations);
+    setAi((a) => ({ ...a, applied: { ...a.applied, [s.id]: errors } }));
+    setToast(errors.length ? `Applied with ${errors.length} problem(s): ${errors[0]}` : `Applied: ${s.title}. Ctrl+Z to undo.`);
+  };
+
+  const showTables = (names: string[]) => {
+    const ids = names
+      .map((n) => {
+        const nm = n.toLowerCase();
+        return schemaRef.current.tables.find((t) => qualifiedName(t).toLowerCase() === nm || t.name.toLowerCase() === nm.split('.').pop());
+      })
+      .filter((t): t is Table => !!t)
+      .map((t) => t.id);
+    if (!ids.length) return;
+    setNodes((nds) => nds.map((n) => ({ ...n, selected: ids.length === 1 && n.id === ids[0] })));
+    rf.fitView({ nodes: ids.map((id) => ({ id })), duration: 350, maxZoom: 1.1, padding: 0.3 });
+  };
+
   const toggleSchema = (s: string) =>
     setHiddenSchemas((prev) => {
       const next = new Set(prev);
@@ -606,14 +748,14 @@ export function App() {
   return (
     <NodeActionsContext.Provider value={nodeActions}>
       <EdgeActionsContext.Provider value={edgeActions}>
-        <div className="erd-app" onClick={() => menu && setMenu(undefined)}>
+        <div className={`erd-app ${editable ? '' : 'standalone'} ${exporting ? 'exporting' : ''}`} onClick={() => menu && setMenu(undefined)}>
           <div className="erd-toolbar" onClick={(e) => e.stopPropagation()}>
             <div className="tb-title">
               <strong>{meta?.title ?? 'ERD'}</strong>
               <span className="muted small" title={meta?.sourceLabel}>
                 {visibleTables.length} tables · {relCount} relations
               </span>
-              {dirty ? (
+              {dirty && editable ? (
                 <span className="badge" title="Edits are kept as a draft. Export a migration to apply them.">
                   edited
                 </span>
@@ -660,21 +802,36 @@ export function App() {
                   ) : null}
                 </div>
               ) : null}
-              <button className="btn" onClick={addTable} title="Add a new table">
-                + Table
-              </button>
+              {editable ? (
+                <>
+                  <button className="btn" onClick={addTable} title="Add a new table">
+                    + Table
+                  </button>
+                  <button
+                    className="btn"
+                    onClick={() => setRelDraft(selectedTable ? { childTable: selectedTable } : {})}
+                    title="Create a primary key → foreign key relationship (or drag between column dots)"
+                  >
+                    + Relation
+                  </button>
+                </>
+              ) : null}
               <button className="btn" onClick={runAutoLayout} title="Re-arrange tables automatically">
                 Auto layout
               </button>
               <button className="btn" onClick={() => rf.fitView({ padding: 0.08, duration: 300 })} title="Fit diagram to screen">
                 Fit
               </button>
-              <button className="btn" disabled={!canUndo} onClick={undo} title="Undo (Ctrl+Z)">
-                ↶
-              </button>
-              <button className="btn" disabled={!canRedo} onClick={redo} title="Redo (Ctrl+Y)">
-                ↷
-              </button>
+              {editable ? (
+                <>
+                  <button className="btn" disabled={!canUndo} onClick={undo} title="Undo (Ctrl+Z)">
+                    ↶
+                  </button>
+                  <button className="btn" disabled={!canRedo} onClick={redo} title="Redo (Ctrl+Y)">
+                    ↷
+                  </button>
+                </>
+              ) : null}
               {meta?.warnings.length ? (
                 <div className="dropdown">
                   <button className="btn warn" onClick={() => setMenu(menu === 'warnings' ? undefined : 'warnings')} title="Parser warnings">
@@ -692,38 +849,99 @@ export function App() {
                   ) : null}
                 </div>
               ) : null}
-              <button className="btn" onClick={() => post({ type: 'reload' })} title="Reload from source">
-                Reload
-              </button>
-              {dirty ? (
-                <button className="btn" onClick={() => post({ type: 'discard' })} title="Discard all edits">
-                  Discard edits
-                </button>
+              {editable ? (
+                <>
+                  <button className="btn" onClick={() => post({ type: 'reload' })} title="Reload from source">
+                    Reload
+                  </button>
+                  {dirty ? (
+                    <button className="btn" onClick={() => post({ type: 'discard' })} title="Discard all edits">
+                      Discard edits
+                    </button>
+                  ) : null}
+                  {meta?.canSaveFile ? (
+                    <button className="btn" onClick={saveFile} title="Save edits and layout back into the .erd.json file">
+                      Save
+                    </button>
+                  ) : null}
+                  <button
+                    className={`btn ${aiOpen ? 'on' : ''}`}
+                    onClick={() => (setEditor(undefined), setAiOpen(!aiOpen))}
+                    title="Ask an AI model to review the schema for normalisation problems"
+                  >
+                    ✨ AI review
+                  </button>
+                </>
               ) : null}
               <div className="dropdown">
-                <button className="btn primary" onClick={() => setMenu(menu === 'export' ? undefined : 'export')}>
-                  Export SQL ▾
+                <button className="btn" onClick={() => setMenu(menu === 'share' ? undefined : 'share')}>
+                  {editable ? 'Share ▾' : 'Download ▾'}
                 </button>
-                {menu === 'export' ? (
+                {menu === 'share' ? (
                   <div className="menu right">
-                    <button className="menu-item col" onClick={() => doExport('full')}>
-                      <span>Full schema (PostgreSQL)</span>
-                      <span className="muted small">
-                        CREATE TABLE for {hiddenSchemas.size ? 'visible schemas' : 'every table'}, then foreign keys
-                      </span>
+                    <button className="menu-item col" onClick={() => exportImage('png')}>
+                      <span>Image: PNG (high-res)</span>
+                      <span className="muted small">Whole diagram at up to 4× resolution, so it stays sharp when zoomed in</span>
                     </button>
-                    <button className="menu-item col" disabled={!dirty} onClick={() => doExport('diff')}>
-                      <span>Changes only — migration (PostgreSQL)</span>
-                      <span className="muted small">{dirty ? 'ALTER/CREATE/DROP for edits made in the diagram' : 'No edits yet'}</span>
+                    <button className="menu-item col" onClick={() => exportImage('svg')}>
+                      <span>Image: SVG (vector)</span>
+                      <span className="muted small">Infinite zoom. Opens in browsers, Inkscape, Illustrator and Visio</span>
                     </button>
+                    <label className="menu-item small">
+                      <input
+                        type="checkbox"
+                        checked={imageTheme === 'dark'}
+                        onChange={(e) => {
+                          const v = e.target.checked ? 'dark' : 'light';
+                          setImageTheme(v);
+                          try {
+                            localStorage.setItem('erd.imageTheme', v);
+                          } catch {
+                            /* storage unavailable */
+                          }
+                        }}
+                      />
+                      <span>Dark image background</span>
+                    </label>
+                    <div className="menu-sep" />
+                    <button className="menu-item col" onClick={() => share('erd')}>
+                      <span>Diagram file (.erd.json)</span>
+                      <span className="muted small">Schema + layout; opens and stays editable in ERD Viewer</span>
+                    </button>
+                    {editable ? (
+                      <button className="menu-item col" onClick={() => share('html')}>
+                        <span>Standalone viewer (.html)</span>
+                        <span className="muted small">One file anyone can open in a browser to explore the diagram</span>
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
+              {editable ? (
+                <div className="dropdown">
+                  <button className="btn primary" onClick={() => setMenu(menu === 'export' ? undefined : 'export')}>
+                    Export SQL ▾
+                  </button>
+                  {menu === 'export' ? (
+                    <div className="menu right">
+                      <button className="menu-item col" onClick={() => doExport('full')}>
+                        <span>Full schema (PostgreSQL)</span>
+                        <span className="muted small">
+                          CREATE TABLE for {hiddenSchemas.size ? 'visible schemas' : 'every table'}, then foreign keys
+                        </span>
+                      </button>
+                      <button className="menu-item col" disabled={!dirty} onClick={() => doExport('diff')}>
+                        <span>Changes only — migration (PostgreSQL)</span>
+                        <span className="muted small">{dirty ? 'ALTER/CREATE/DROP for edits made in the diagram' : 'No edits yet'}</span>
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
           <div className="erd-main">
             <div className="erd-canvas">
-              <EdgeMarkers />
               <ReactFlow<TableNodeType, RelationEdgeType>
                 nodes={nodes}
                 edges={edges}
@@ -731,28 +949,33 @@ export function App() {
                 edgeTypes={edgeTypes}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
-                onConnect={onConnect}
+                onConnect={editable ? onConnect : undefined}
+                nodesConnectable={editable}
                 isValidConnection={isValidConnection}
                 connectionMode={ConnectionMode.Loose}
-                onNodeDragStop={() => scheduleSave()}
+                onNodeDragStop={() => editable && scheduleSave()}
                 onNodeMouseEnter={(_, n) => setHoverTable(n.id)}
                 onNodeMouseLeave={() => setHoverTable(undefined)}
                 onPaneClick={() => setSelectedEdges(new Set())}
                 onEdgeMouseEnter={(_, e) => setHoverEdge(relIdOf(e.id))}
                 onEdgeMouseLeave={() => setHoverEdge(undefined)}
-                deleteKeyCode={['Delete', 'Backspace']}
+                deleteKeyCode={editable ? ['Delete', 'Backspace'] : null}
                 minZoom={0.05}
                 maxZoom={2}
-                onlyRenderVisibleElements={nodes.length > 60}
+                onlyRenderVisibleElements={nodes.length > 60 && !exporting}
                 proOptions={{ hideAttribution: true }}
                 fitView={false}
               >
+                {/* Inside the viewport so image export includes the crow's-foot markers. */}
+                <ViewportPortal>
+                  <EdgeMarkers />
+                </ViewportPortal>
                 <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
                 <MiniMap pannable zoomable nodeStrokeWidth={2} className="erd-minimap" />
                 <Controls showInteractive={false} position="bottom-right" style={{ marginRight: 230 }} />
               </ReactFlow>
               <Legend />
-              {schema.tables.length === 0 && meta ? (
+              {schema.tables.length === 0 && meta && editable ? (
                 <div className="erd-empty-state">
                   <p>No tables yet.</p>
                   <button className="btn primary" onClick={addTable}>
@@ -762,7 +985,7 @@ export function App() {
               ) : null}
               {toast ? <div className="erd-toast">{toast}</div> : null}
             </div>
-            {editor ? (
+            {editor && editable ? (
               <TableEditor
                 key={editor.tableId}
                 schema={schema}
@@ -772,8 +995,34 @@ export function App() {
                 onClose={() => setEditor(undefined)}
                 onDeleted={() => setEditor(undefined)}
               />
+            ) : aiOpen && editable ? (
+              <AiPanel
+                state={ai}
+                provider={aiProvider}
+                selectedTableName={selectedTable ? qualifiedName(tableById.get(selectedTable) ?? { schema: '', name: '' }) : undefined}
+                visibleCount={visibleTables.length}
+                onRun={runAi}
+                onCancel={() => post({ type: 'aiCancel' })}
+                onApply={applySuggestion}
+                onShowTables={showTables}
+                onChooseProvider={() => post({ type: 'aiChooseProvider' })}
+                onExportMigration={() => doExport('diff')}
+                onClose={() => setAiOpen(false)}
+              />
             ) : null}
           </div>
+          {relDraft && editable ? (
+            <RelationDialog
+              schema={schema}
+              draft={relDraft}
+              onClose={() => setRelDraft(undefined)}
+              onCreate={(ops, summary) => {
+                const errors = runOps(ops);
+                setRelDraft(undefined);
+                setToast(errors.length ? `Relationship created with problems: ${errors.join('; ')}` : `Relationship created: ${summary}`);
+              }}
+            />
+          ) : null}
         </div>
       </EdgeActionsContext.Provider>
     </NodeActionsContext.Provider>

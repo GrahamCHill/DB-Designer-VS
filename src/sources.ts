@@ -2,13 +2,14 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ConnectionInfo, DbKind, introspect } from './introspect/index';
-import { Schema, emptySchema } from './shared/model';
+import { Layout, Schema, emptySchema, isErdFile } from './shared/model';
 import { parseSql } from './shared/sqlParser';
 
 export type Source =
   | { kind: 'sql'; paths: string[] }
   | { kind: 'db'; connection: ConnectionInfo }
-  | { kind: 'blank'; id: string };
+  | { kind: 'blank'; id: string }
+  | { kind: 'erd'; path: string };
 
 export interface LoadedSource {
   schema: Schema;
@@ -16,6 +17,9 @@ export interface LoadedSource {
   label: string;
   title: string;
   files?: string[];
+  /** Layout stored in an .erd.json file. */
+  layout?: Layout;
+  hiddenSchemas?: string[];
 }
 
 export function sourceKey(s: Source): string {
@@ -26,6 +30,8 @@ export function sourceKey(s: Source): string {
       return `db:${s.connection.kind}:${s.connection.name}`;
     case 'blank':
       return `blank:${s.id}`;
+    case 'erd':
+      return `erd:${path.resolve(s.path).toLowerCase()}`;
   }
 }
 
@@ -42,6 +48,8 @@ export function sourceTitle(s: Source): string {
       return s.connection.name;
     case 'blank':
       return 'New diagram';
+    case 'erd':
+      return path.basename(s.path).replace(/.erd.json$/i, '');
   }
 }
 
@@ -109,6 +117,18 @@ export async function loadSource(s: Source): Promise<LoadedSource> {
     }
     case 'blank':
       return { schema: emptySchema('postgres'), warnings: [], title, label: 'Blank diagram (PostgreSQL)' };
+    case 'erd': {
+      const raw = JSON.parse(await fs.readFile(s.path, 'utf8'));
+      if (!isErdFile(raw)) throw new Error(`${path.basename(s.path)} is not an ERD Viewer diagram file.`);
+      return {
+        schema: raw.schema,
+        warnings: [],
+        title: raw.title || title,
+        label: `Shared diagram · ${s.path}${raw.source ? ` · from ${raw.source}` : ''}`,
+        layout: raw.layout,
+        hiddenSchemas: raw.hiddenSchemas,
+      };
+    }
   }
 }
 

@@ -4,3 +4,4 @@ dist-test/
 *.vsix
 test/harness/data.js
 .claude/
+test/harness/standalone.html

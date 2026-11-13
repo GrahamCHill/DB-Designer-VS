@@ -36,6 +36,7 @@ export type SchemaOp =
       ref_table: string;
       ref_columns: string[];
       on_delete?: FkAction;
+      on_update?: FkAction;
     }
   | { op: 'drop_foreign_key'; table: string; columns: string[] };
 
@@ -114,7 +115,7 @@ export function describeOp(op: SchemaOp): string {
     case 'set_primary_key':
       return `Primary key of ${op.table} → (${op.columns.join(', ')})`;
     case 'add_foreign_key':
-      return `FK ${op.table}(${op.columns.join(', ')}) → ${op.ref_table}(${op.ref_columns.join(', ')})${op.on_delete ? ` ON DELETE ${op.on_delete}` : ''}`;
+      return `FK ${op.table}(${op.columns.join(', ')}) → ${op.ref_table}(${op.ref_columns.join(', ')})${op.on_delete ? ` ON DELETE ${op.on_delete}` : ''}${op.on_update ? ` ON UPDATE ${op.on_update}` : ''}`;
     case 'drop_foreign_key':
       return `Drop FK on ${op.table}(${op.columns.join(', ')})`;
   }
@@ -241,6 +242,7 @@ export function applyOps(s: Schema, ops: SchemaOp[], defaultSchema = 'public'): 
             toTable: rt.id,
             toColumns: to.map((c) => c!.id),
             onDelete: op.on_delete && FK_ACTIONS.includes(op.on_delete) && op.on_delete !== 'NO ACTION' ? op.on_delete : undefined,
+            onUpdate: op.on_update && FK_ACTIONS.includes(op.on_update) && op.on_update !== 'NO ACTION' ? op.on_update : undefined,
           };
           s.relations.push(rel);
           return;
@@ -343,6 +345,7 @@ export function sanitizeOps(raw: unknown): { ops: SchemaOp[]; problems: string[]
         const cols = strs(o.columns).length ? strs(o.columns) : column ? [column] : [];
         const refTable = str(o.ref_table);
         const onDelete = str(o.on_delete)?.toUpperCase().replace(/_/g, ' ') as FkAction | undefined;
+        const onUpdate = str(o.on_update)?.toUpperCase().replace(/_/g, ' ') as FkAction | undefined;
         return cols.length && refTable
           ? ops.push({
               op: 'add_foreign_key',
@@ -351,6 +354,7 @@ export function sanitizeOps(raw: unknown): { ops: SchemaOp[]; problems: string[]
               ref_table: refTable,
               ref_columns: strs(o.ref_columns),
               on_delete: onDelete && FK_ACTIONS.includes(onDelete) ? onDelete : undefined,
+              on_update: onUpdate && FK_ACTIONS.includes(onUpdate) ? onUpdate : undefined,
             })
           : problems.push(`#${i + 1}: add_foreign_key needs columns and ref_table`);
       }
@@ -382,6 +386,7 @@ export const OPERATION_JSON_SCHEMA = {
     ref_table: { type: 'string' },
     ref_columns: { type: 'array', items: { type: 'string' } },
     on_delete: { type: 'string', enum: FK_ACTIONS },
+    on_update: { type: 'string', enum: FK_ACTIONS },
     column_defs: {
       type: 'array',
       description: 'Column definitions for add_table (and add_column, one entry).',

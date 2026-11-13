@@ -1,5 +1,5 @@
-import React, { memo, useContext } from 'react';
-import { Handle, NodeProps, Position, Node } from '@xyflow/react';
+import React, { memo, useContext, useEffect } from 'react';
+import { Handle, NodeProps, Position, Node, useUpdateNodeInternals } from '@xyflow/react';
 import { Table } from '../shared/model';
 import { DiamondIcon, EditIcon, HashIcon, KeyIcon, LinkIcon, PlusIcon, UniqueIcon } from './icons';
 import { NODE_WIDTH } from './layout';
@@ -27,8 +27,12 @@ export interface NodeActions {
 
 export const NodeActionsContext = React.createContext<NodeActions>({ edit() {}, addColumn() {} });
 
-function TableNodeImpl({ data, selected }: NodeProps<TableNodeType>) {
+function TableNodeImpl({ id, data, selected }: NodeProps<TableNodeType>) {
   const actions = useContext(NodeActionsContext);
+  // Columns (and so connection handles) changed: let React Flow re-measure them so edges attach.
+  const updateNodeInternals = useUpdateNodeInternals();
+  const handleKey = data.table.columns.map((c) => c.id).join("|");
+  useEffect(() => updateNodeInternals(id), [handleKey, id, updateNodeInternals]);
   const { table, fkTargets, dimmed, related, showSchema, isNew } = data;
   const hl = data.hlCols ? new Set(data.hlCols.split('|')) : undefined;
   const changed = data.changed ? new Set(data.changed.split('|')) : undefined;

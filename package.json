@@ -1,23 +1,27 @@
 {
   "name": "erd-viewer",
   "displayName": "ERD Viewer",
-  "description": "Interactive, editable ER diagrams from SQL files or a live database (PostgreSQL, SQL Server, MySQL, SQLite), with PostgreSQL export.",
-  "version": "0.1.0",
+  "description": "Interactive, editable ER diagrams from SQL files or a live database (PostgreSQL, SQL Server, MySQL, SQLite). PostgreSQL export, high-res image export, shareable diagrams and AI normalisation reviews.",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.95.0"
   },
   "categories": [
     "Visualization",
-    "Other"
+    "Other",
+    "AI"
   ],
   "keywords": [
     "erd",
     "er diagram",
     "sql",
     "postgres",
-    "schema"
+    "schema",
+    "normalization",
+    "database",
+    "diagram"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [],
@@ -39,6 +43,11 @@
         "category": "ERD Viewer"
       },
       {
+        "command": "erdViewer.openErdFile",
+        "title": "Open Shared Diagram (.erd.json)…",
+        "category": "ERD Viewer"
+      },
+      {
         "command": "erdViewer.manageConnections",
         "title": "Remove Saved Connection…",
         "category": "ERD Viewer"
@@ -52,13 +61,33 @@
         "command": "erdViewer.newBlank",
         "title": "New Blank ERD",
         "category": "ERD Viewer"
+      },
+      {
+        "command": "erdViewer.aiReview",
+        "title": "AI: Review Normalisation of Open Diagram",
+        "category": "ERD Viewer"
+      },
+      {
+        "command": "erdViewer.aiChooseProvider",
+        "title": "AI: Choose Provider…",
+        "category": "ERD Viewer"
+      },
+      {
+        "command": "erdViewer.aiSetAnthropicKey",
+        "title": "AI: Set Anthropic API Key…",
+        "category": "ERD Viewer"
+      },
+      {
+        "command": "erdViewer.aiClearAnthropicKey",
+        "title": "AI: Remove Anthropic API Key",
+        "category": "ERD Viewer"
       }
     ],
     "menus": {
       "explorer/context": [
         {
           "command": "erdViewer.openFromExplorer",
-          "when": "explorerResourceIsFolder || resourceExtname == .sql",
+          "when": "explorerResourceIsFolder || resourceExtname == .sql || resourceFilename =~ /.erd.json$/",
           "group": "navigation@90"
         }
       ],
@@ -86,16 +115,236 @@
             "out"
           ],
           "description": "Folder names skipped when collecting .sql files recursively. Folders starting with '.' are always skipped."
+        },
+        "erdViewer.ai.provider": {
+          "type": "string",
+          "enum": [
+            "vscode",
+            "anthropic",
+            "ollama"
+          ],
+          "default": "vscode",
+          "enumDescriptions": [
+            "A chat model available in VS Code (GitHub Copilot or another installed provider). No API key needed.",
+            "Anthropic Claude API with your API key (stored in Secret Storage; set it with \"ERD Viewer: AI: Set Anthropic API Key\").",
+            "A local Ollama server, so the schema never leaves your machine."
+          ],
+          "description": "Which language model the AI normalisation review uses. Only the schema (tables, columns, keys) is sent, never row data."
+        },
+        "erdViewer.ai.vscodeModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model family for the VS Code provider (e.g. \"gpt-4o\", \"claude-sonnet-4\"). Empty = ask the first time."
+        },
+        "erdViewer.ai.anthropicModel": {
+          "type": "string",
+          "default": "claude-opus-5-5",
+          "description": "Claude model id for the Anthropic provider."
+        },
+        "erdViewer.ai.ollamaUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Base URL of the Ollama server."
+        },
+        "erdViewer.ai.ollamaModel": {
+          "type": "string",
+          "default": "",
+          "description": "Ollama model name (e.g. \"qwen2.5-coder:14b\"). Empty = choose from installed models the first time."
         }
       }
-    }
+    },
+    "customEditors": [
+      {
+        "viewType": "erdViewer.erdFile",
+        "displayName": "ERD Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.erd.json"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "erd-viewer_getSchema",
+        "displayName": "Get ERD diagram schema",
+        "toolReferenceName": "erdSchema",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(type-hierarchy)",
+        "userDescription": "Read the tables, columns and foreign keys of the ERD diagram that is open in ERD Viewer.",
+        "modelDescription": "Returns the schema of the ER diagram currently open in the ERD Viewer extension (including unsaved edits), as PostgreSQL DDL (default) or compact JSON. Use it before reviewing or changing the database design, e.g. for normalisation advice.",
+        "tags": [
+          "database",
+          "erd",
+          "schema"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "enum": [
+                "ddl",
+                "json"
+              ],
+              "description": "Output format. Default ddl."
+            }
+          }
+        }
+      },
+      {
+        "name": "erd-viewer_applyChanges",
+        "displayName": "Apply changes to ERD diagram",
+        "toolReferenceName": "erdApply",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(edit)",
+        "userDescription": "Apply schema changes (add/split tables, columns, keys, foreign keys) to the open ERD diagram as an undoable draft.",
+        "modelDescription": "Applies a list of schema operations to the ER diagram open in ERD Viewer, as one undoable draft edit that the user confirms. Call erd-viewer_getSchema first and use exact, schema-qualified table names. Operations: add_table (table, column_defs), drop_table, rename_table (new_name), add_column (table, column_defs with one entry), drop_column (column), rename_column (column, new_name), alter_column (column + type/nullable/unique/default), set_primary_key (columns), add_foreign_key (columns, ref_table, ref_columns, on_delete), drop_foreign_key (columns). The user can afterwards export the result as a PostgreSQL migration.",
+        "tags": [
+          "database",
+          "erd",
+          "schema"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "operations"
+          ],
+          "properties": {
+            "description": {
+              "type": "string",
+              "description": "One sentence explaining why these changes are made (shown to the user)."
+            },
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "op",
+                  "table"
+                ],
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "enum": [
+                      "add_table",
+                      "drop_table",
+                      "rename_table",
+                      "add_column",
+                      "drop_column",
+                      "rename_column",
+                      "alter_column",
+                      "set_primary_key",
+                      "add_foreign_key",
+                      "drop_foreign_key"
+                    ]
+                  },
+                  "table": {
+                    "type": "string",
+                    "description": "Target table, schema-qualified when not in the default schema (e.g. \"app.users\")."
+                  },
+                  "column": {
+                    "type": "string",
+                    "description": "Column name for column-level operations."
+                  },
+                  "new_name": {
+                    "type": "string",
+                    "description": "For rename_table / rename_column."
+                  },
+                  "type": {
+                    "type": "string",
+                    "description": "Data type for add_column / alter_column."
+                  },
+                  "nullable": {
+                    "type": "boolean"
+                  },
+                  "unique": {
+                    "type": "boolean"
+                  },
+                  "primary_key": {
+                    "type": "boolean"
+                  },
+                  "default": {
+                    "type": "string"
+                  },
+                  "columns": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Column names for set_primary_key / add_foreign_key / drop_foreign_key."
+                  },
+                  "ref_table": {
+                    "type": "string"
+                  },
+                  "ref_columns": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "on_delete": {
+                    "type": "string",
+                    "enum": [
+                      "NO ACTION",
+                      "RESTRICT",
+                      "CASCADE",
+                      "SET NULL",
+                      "SET DEFAULT"
+                    ]
+                  },
+                  "column_defs": {
+                    "type": "array",
+                    "description": "Column definitions for add_table (and add_column, one entry).",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "name",
+                        "type"
+                      ],
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string"
+                        },
+                        "nullable": {
+                          "type": "boolean"
+                        },
+                        "primary_key": {
+                          "type": "boolean"
+                        },
+                        "unique": {
+                          "type": "boolean"
+                        },
+                        "default": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "comment": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p .",
     "test": "node esbuild.mjs --tests && node --test \"dist-test/*.test.js\"",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies --allow-missing-repository --skip-license"
+    "smoke": "node esbuild.mjs && node test/activate-smoke.js",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
@@ -110,7 +359,6 @@
     "@vscode/vsce": "^4.1.1",
     "@xyflow/react": "^12.12.1",
     "esbuild": "^0.28.2",
-    "html-to-image": "^1.11.13",
     "mssql": "^12.7.14",
     "mysql2": "^3.24.6",
     "pg": "^8.23.1",
@@ -118,5 +366,9 @@
     "react-dom": "^18.3.1",
     "sql.js": "^1.16.0",
     "typescript": "^7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GrahamCHill/ERD-Viewer.git"
   }
 }

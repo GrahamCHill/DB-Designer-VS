@@ -687,7 +687,29 @@ export function App() {
     } else {
       const el = document.querySelector('.react-flow')?.getBoundingClientRect();
       const c = rf.screenToFlowPosition({ x: (el?.left ?? 0) + (el?.width ?? 800) / 2, y: (el?.top ?? 0) + (el?.height ?? 600) / 2 });
-      rect = { x: Math.round(c.x - 300), y: Math.round(c.y - 200), w: 600, h: 400 };
+      // Empty group: find a free area near the centre so it isn't hidden behind tables.
+      const tables = nodesRef.current.filter(isTable).map((n) => ({
+        x: n.position.x,
+        y: n.position.y,
+        w: n.measured?.width ?? NODE_WIDTH,
+        h: n.measured?.height ?? nodeHeight(n.data.table),
+      }));
+      const W = 600;
+      const H = 400;
+      const free = (x: number, y: number) => tables.every((r) => x + W + 30 < r.x || x > r.x + r.w + 30 || y + H + 30 < r.y || y > r.y + r.h + 30);
+      let spot = { x: c.x - W / 2, y: c.y - H / 2 };
+      search: for (let ring = 0; ring < 25; ring++)
+        for (let dx = -ring; dx <= ring; dx++)
+          for (let dy = -ring; dy <= ring; dy++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
+            const cand = { x: c.x - W / 2 + dx * (W / 2), y: c.y - H / 2 + dy * (H / 2) };
+            if (free(cand.x, cand.y)) {
+              spot = cand;
+              break search;
+            }
+          }
+      rect = { x: Math.round(spot.x), y: Math.round(spot.y), w: W, h: H };
+      setTimeout(() => rf.fitBounds({ x: rect.x - 100, y: rect.y - 100, width: rect.w + 200, height: rect.h + 200 }, { duration: 300 }), 50);
     }
     const group: DiagramGroup = { id, name: sel.length ? `Group ${gs.length + 1}` : 'New group', color, ...rect, tables };
     const next = gs.map((g) => ({ ...g, tables: g.tables.filter((k) => !tables.includes(k)) }));

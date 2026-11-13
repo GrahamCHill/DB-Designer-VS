@@ -47,6 +47,7 @@ const configs = args.has('--tests')
           'test/sqlexport.test.ts',
           'test/validate.test.ts',
           'test/router.test.ts',
+          'test/groups.test.ts',
         ],
         outdir: 'dist-test',
       },

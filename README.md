@@ -28,7 +28,7 @@ Everything is also available from the Command Palette:
 | **Remove Saved Connection…** | |
 | **New Blank ERD** | Start from an empty PostgreSQL diagram. |
 | **Open Shared Diagram (.erd.json)…** | Open a diagram someone shared, or double-click any `*.erd.json` file. |
-| **AI: Review Normalisation of Open Diagram** | Opens the AI review panel. Related commands: **AI: Choose Provider…**, **AI: Set / Remove Anthropic API Key**. |
+| **AI: Review Normalisation of Open Diagram** | Opens the AI review panel. Related commands: **AI: Choose Provider…**, **AI: Set API Key (stored encrypted)…**, **AI: Remove Saved API Keys…**. |
 
 Connection string examples:
 
@@ -49,6 +49,21 @@ For live PostgreSQL connections, Supabase's internal schemas (`auth`, `storage`,
 - **Drag** tables to move them. Positions are saved per source. Use **Auto layout** to re-arrange.
 - **Find table…** jumps to a table. Press Enter again to cycle through matches.
 
+### Lines and layout
+
+- **Lines: routed** (the default) draws each relationship as an orthogonal path that goes *around* tables instead of under them. The path is found with an A* search over the corridors between tables, with a penalty for bends. Click the button to switch to direct lines. While you drag, the lines attached to the moving tables are drawn directly, and they re-route when you drop.
+- **Auto layout** spaces tables out with wide corridors so routed lines have room. Groups are kept intact and moved as blocks.
+
+### Groups
+
+Like DB-Designer, you can wrap related tables in coloured groups:
+
+- Select tables (Ctrl/Shift-click, or Shift-drag a box) and click **+ Group** to wrap them. With nothing selected you get an empty group, placed in a free area.
+- **Drag the group header** to move the group with all its tables and nested groups. Select a group to resize it with its handles.
+- **Drop a table inside a group** to add it; drag it out to remove it. Drop a group inside another to nest it. Nested groups show a dashed border and a SUB tag.
+- **Edit** (on the header) renames the group, changes its colour, or deletes it. The tables are kept.
+- Groups are saved with the layout, in `.erd.json` files and in the standalone HTML, and they appear in PNG/SVG exports.
+
 ### Editing
 
 - **+ Relation** opens the relationship dialog. You can also drag from a column's dot (visible when you hover a table) to another column. The dialog lets you:
@@ -65,6 +80,17 @@ For live PostgreSQL connections, Supabase's internal schemas (`auth`, `storage`,
 - Edits are kept as a draft per source, and survive closing the tab. **Discard edits** reverts to the source. **Reload** re-reads it. SQL-file sources reload automatically when files change, unless you have draft edits.
 
 ### Export SQL
+
+**Every export is validated before it is saved**, and the result is written into the file's header:
+
+| Target | How it is checked |
+|---|---|
+| PostgreSQL | **Executed** in PostgreSQL 17, running in-process via PGlite (WebAssembly). The `uuid-ossp`, `pgcrypto` and `citext` extensions are included. A migration is run on top of the starting schema. |
+| SQLite | **Executed** in SQLite (sql.js), followed by `PRAGMA foreign_key_check` and `integrity_check`. |
+| SQL Server, MySQL | Re-read with the parser and compared with the diagram (every table, column, primary key and foreign key), plus syntax balance checks. These engines can't run inside VS Code; CI runs the same exports on real SQL Server 2022 and MySQL 8.4. |
+| All | Model rules: empty or duplicate names, identifiers over the engine's length limit, FKs to non-key columns or incompatible types, tables without columns, clashing names after schema flattening, and PostgreSQL index-name clashes. |
+
+If anything fails you see the problems (also listed in the **DB Designer** output channel) and can fix them or **Save Anyway**. **Export SQL → Validate SQL (all dialects)** runs the checks for all four targets without saving.
 
 **Full schema**: choose **PostgreSQL**, **SQL Server**, **MySQL / MariaDB** or **SQLite**. If schemas are hidden in the filter, only the visible ones are exported.
 
@@ -120,17 +146,20 @@ The exporter also handles each engine's rules:
 - **Diagram file (.erd.json)**: schema + layout + schema filter. Double-click it in VS Code to open it in DB Designer, keep editing, and use **Save** to write it back. Commit it next to your migrations or send it to a colleague.
 - **Standalone viewer (.html)**: one self-contained file, about 0.5 MB plus your schema. It opens in any browser with no install and no network, and lets the reader pan, zoom, search, filter schemas, re-layout, and download PNG/SVG/.erd.json. Viewing only.
 
-### ✨ AI normalisation review
+### AI normalisation review
 
-**✨ AI review** asks a language model to check the diagram for 1NF/2NF/3NF/BCNF problems: repeating groups, list-in-a-column, partial and transitive dependencies, duplicated facts, missing FKs and keys, and types like dates or money stored as text. Each suggestion comes with a severity, an explanation, and concrete steps. **Apply to diagram** performs the steps as one undoable edit, and **Export migration** turns everything you applied into SQL. You can review the whole visible diagram or just the selected table and its neighbours, and add a focus ("look at the approvals tables").
+**AI review** asks a language model to check the diagram for 1NF/2NF/3NF/BCNF problems: repeating groups, list-in-a-column, partial and transitive dependencies, duplicated facts, missing FKs and keys, and types like dates or money stored as text. Each suggestion comes with a severity, an explanation, and concrete steps. **Apply to diagram** performs the steps as one undoable edit, and **Export migration** turns everything you applied into SQL. You can review the whole visible diagram or just the selected table and its neighbours, and add a focus ("look at the approvals tables").
 
 Only the schema structure is sent (tables, columns, types, keys), never row data. Choose the provider with **DB Designer: AI: Choose Provider…** or the **Change** button:
 
 | Provider (`dbDesigner.ai.provider`) | Needs | Notes |
 |---|---|---|
 | `vscode` (default) | GitHub Copilot or another VS Code chat-model provider | No key. Model family via `dbDesigner.ai.vscodeModel`; you are asked on first use. |
-| `anthropic` | An Anthropic API key (**DB Designer: AI: Set Anthropic API Key…**, kept in Secret Storage; `ANTHROPIC_API_KEY` also works) | Default model `claude-opus-5-5` (`dbDesigner.ai.anthropicModel`). Uses structured JSON output and server-side refusal fallbacks. |
+| `anthropic` | An Anthropic API key (**AI: Set API Key…**; `ANTHROPIC_API_KEY` also works) | Default model `claude-opus-5-5` (`dbDesigner.ai.anthropicModel`). Uses structured JSON output and server-side refusal fallbacks. |
+| `openai` | **Groq** (default), OpenAI, OpenRouter, LM Studio, or any OpenAI-compatible URL (`dbDesigner.ai.openaiBaseUrl`) plus its API key (**AI: Set API Key…**; `GROQ_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` also work) | Choosing it walks you through endpoint, key and model, and lists the endpoint's models. Default Groq model: `llama-3.3-70b-versatile` (`dbDesigner.ai.openaiModel`). Requests JSON-schema output where the server supports it. |
 | `ollama` | A running [Ollama](https://ollama.com) (`dbDesigner.ai.ollamaUrl`) | Fully local. Pick a model on first use (`dbDesigner.ai.ollamaModel`). Small models work but are slow and less reliable. `qwen3.5:4b` gave a correct review of a test schema in about 5 minutes on CPU. |
+
+**API keys are stored encrypted**, in VS Code Secret Storage, which uses your operating system's keychain (Windows Credential Manager/DPAPI, macOS Keychain, libsecret on Linux). They are never written to settings files, and there is one key per endpoint.
 
 ### Agent tools (Copilot agent mode and other VS Code agents)
 

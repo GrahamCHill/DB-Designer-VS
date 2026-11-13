@@ -4,6 +4,11 @@ import { ConstraintRow, IntrospectionRows, normalizeAction } from './index';
 export async function introspectMysql(connection: string): Promise<IntrospectionRows> {
   const conn = await mysql.createConnection(connection);
   try {
+    // Read-only by construction: catalog reads run in a READ ONLY transaction that is rolled back.
+    await conn.query('START TRANSACTION READ ONLY');
+    const [ver] = await conn.query<mysql.RowDataPacket[]>('SELECT VERSION() AS v');
+    // MariaDB reports COLUMN_DEFAULT as an SQL expression already ('text' quoted, NULL as the word NULL).
+    const mariadb = /mariadb/i.test(String(ver[0]?.v ?? ''));
     const [dbRows] = await conn.query<mysql.RowDataPacket[]>('SELECT DATABASE() AS db');
     const db = dbRows[0]?.db;
     if (!db) throw new Error('No database selected. Include the database name in the URL, e.g. mysql://user:pass@host:3306/mydb');
@@ -35,6 +40,7 @@ export async function introspectMysql(connection: string): Promise<Introspection
        WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' AND TABLE_COMMENT <> ''`,
       [db],
     );
+    await conn.query('ROLLBACK');
 
     const constraints = new Map<string, ConstraintRow>();
     for (const k of keys) {
@@ -67,8 +73,10 @@ export async function introspectMysql(connection: string): Promise<Introspection
         type: String(r.type),
         nullable: r.nullable === 'YES',
         default:
-          r.def === null || r.def === undefined
+          r.def === null || r.def === undefined || (mariadb && /^NULL$/i.test(String(r.def)))
             ? null
+            : mariadb
+              ? String(r.def)
             : /^-?\d+(\.\d+)?$/.test(String(r.def)) || /DEFAULT_GENERATED/i.test(r.extra ?? '')
               ? String(r.def)
               : `'${String(r.def).replace(/'/g, "''")}'`,

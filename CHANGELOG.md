@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0: DB Designer VS
+
+- **Renamed to DB Designer VS.** Command IDs and settings moved from `erdViewer.*` to `dbDesigner.*`. `.erd.json` files from earlier versions still open.
+- **Validated SQL export.** Every export is checked before saving. PostgreSQL output is executed in PostgreSQL 17 (PGlite, in-process), and migrations are executed on top of the starting schema. SQLite output is executed in SQLite. SQL Server and MySQL output is re-read and compared with the diagram. Model rules run for every dialect. A new **Validate SQL (all dialects)** command reports on all four targets.
+- **Groq / OpenAI-compatible AI provider**, with presets for Groq, OpenAI, OpenRouter, LM Studio, or a custom URL, and a model picker. **API keys are stored encrypted** in VS Code Secret Storage (the OS keychain).
+- **Routed relationship lines** that go around tables instead of under them, using an A* search on a sparse orthogonal grid. Toggle with **Lines: routed / direct**. Auto layout leaves wider corridors.
+- **Table groups**, as in DB-Designer: coloured, resizable and nestable groups. Dragging a header moves the group with its tables. Groups are saved and exported.
+- The AI review now tolerates common variations in how models describe operations.
+- Removed the ✨ icon from **AI review**.
+
 ## 0.3.0
 
 - **Export to SQL Server, MySQL/MariaDB and SQLite** alongside PostgreSQL. Types and defaults are converted to the closest equivalents. The exporter also handles each engine's rules: SQL Server cascade-path and key-size limits, nullable unique columns, unique constraint names, MySQL row-size and default rules, and SQLite inline foreign keys. Every lossy conversion is listed under "Conversion notes" in the output. All four dialects were tested on real engines, with schema creation, introspection and data checks.

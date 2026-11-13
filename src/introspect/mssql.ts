@@ -89,11 +89,15 @@ function toConfig(conn: string): string | sql.config {
 
 export async function introspectMssql(connection: string): Promise<IntrospectionRows> {
   const pool = await new sql.ConnectionPool(toConfig(connection) as sql.config).connect();
+  // Read-only by construction: all catalog reads run in one transaction that is always rolled back.
+  const tx = new sql.Transaction(pool);
+  await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
   try {
-    const cols = (await pool.request().query(COLUMNS_SQL)).recordset;
-    const keys = (await pool.request().query(KEYS_SQL)).recordset;
-    const fks = (await pool.request().query(FKS_SQL)).recordset;
-    const comments = (await pool.request().query(TABLE_COMMENTS_SQL)).recordset;
+    const cols = (await new sql.Request(tx).query(COLUMNS_SQL)).recordset;
+    const keys = (await new sql.Request(tx).query(KEYS_SQL)).recordset;
+    const fks = (await new sql.Request(tx).query(FKS_SQL)).recordset;
+    const comments = (await new sql.Request(tx).query(TABLE_COMMENTS_SQL)).recordset;
+    await tx.rollback();
 
     const constraints = new Map<string, ConstraintRow>();
     for (const k of keys) {

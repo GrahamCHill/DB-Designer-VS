@@ -51,14 +51,20 @@ FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
 WHERE t.typtype = 'd' AND ${SYSTEM}`;
 
 export async function introspectPostgres(connectionString: string): Promise<IntrospectionRows> {
-  const client = new Client({ connectionString, connectionTimeoutMillis: 15000 });
+  // Read-only by construction: the session defaults to read-only transactions, everything runs in an
+  // explicit READ ONLY transaction, and we verify the server agrees before reading the catalog.
+  const client = new Client({ connectionString, connectionTimeoutMillis: 15000, options: '-c default_transaction_read_only=on' });
   await client.connect();
   try {
+    await client.query('BEGIN TRANSACTION READ ONLY');
+    const ro = await client.query('SHOW transaction_read_only');
+    if (ro.rows[0]?.transaction_read_only !== 'on') throw new Error('Could not open a read-only transaction; refusing to continue.');
     const cols = await client.query(COLUMNS_SQL);
     const cons = await client.query(CONSTRAINTS_SQL);
     const comments = await client.query(TABLE_COMMENTS_SQL);
     const enums = await client.query(ENUMS_SQL);
     const domains = await client.query(DOMAINS_SQL);
+    await client.query('ROLLBACK');
     return {
       types: [
         ...enums.rows.map((r) => ({ schema: r.schema, name: r.name, kind: 'enum' as const, values: r.values ?? [] })),

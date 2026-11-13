@@ -21,6 +21,7 @@ export interface LoadedSource {
   layout?: Layout;
   hiddenSchemas?: string[];
   groups?: import('./shared/model').DiagramGroup[];
+  edges?: Record<string, import('./shared/model').EdgeRoute>;
 }
 
 export function sourceKey(s: Source): string {
@@ -129,6 +130,7 @@ export async function loadSource(s: Source): Promise<LoadedSource> {
         layout: raw.layout,
         hiddenSchemas: raw.hiddenSchemas,
         groups: raw.groups,
+        edges: raw.edges,
       };
     }
   }

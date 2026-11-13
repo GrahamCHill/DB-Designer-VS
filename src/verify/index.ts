@@ -6,7 +6,7 @@ import { Schema } from '../shared/model';
 import { generateFullSql } from '../shared/pgExport';
 import { EXPORT_DIALECTS, ExportDialect } from '../shared/sqlExport';
 import { structuralCheck, validateForExport } from '../shared/validate';
-import { verifyPostgres } from './postgres';
+import { pg18Features, verifyPostgres } from './postgres';
 
 export interface Verification {
   dialect: ExportDialect;
@@ -64,8 +64,10 @@ export async function verifyExport(input: VerifyInput): Promise<Verification> {
     if (r.skipped) {
       summary = `Not executed: ${r.skipped}. Model rules checked.`;
       warnings.push(summary);
-    } else if (r.ok) summary = `Executed successfully in ${r.engine}${mode === 'diff' ? ' on top of the starting schema' : ''}.`;
-    else {
+    } else if (r.ok) {
+      const pg18 = pg18Features(sql);
+      summary = `Executed successfully in ${r.engine}${mode === 'diff' ? ' on top of the starting schema' : ''}.${pg18.length ? ` PostgreSQL 18 features emulated: ${pg18.join(', ')}.` : ''}`;
+    } else {
       summary = `${r.engine} rejected the SQL.`;
       errors.unshift(`${r.error}${r.statement ? `\n    in: ${r.statement.replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
     }

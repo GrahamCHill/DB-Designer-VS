@@ -4,9 +4,9 @@
 
 import { Position as Side, getSmoothStepPath } from '@xyflow/react';
 import { Box, edgeSides, edgeSidesFor } from './edgeGeometry';
-import { Rect, roundedPath, routeOrthogonal } from './router';
+import { Rect, orthogonalThrough, roundedPath, routeOrthogonal } from './router';
 import type { GroupBox } from './groups';
-import { Relation, Table } from '../shared/model';
+import { EdgeRoute, Relation, Table } from '../shared/model';
 import { HEADER_HEIGHT, NODE_WIDTH, ROW_HEIGHT, nodeHeight } from './layout';
 
 export type { Box } from './edgeGeometry';
@@ -91,6 +91,8 @@ export interface SvgInput {
   title?: string;
   /** Route lines around tables (default true). */
   routing?: boolean;
+  /** Lines the user shaped by hand, keyed by edge id (relation id, or "id::n" for later column pairs). */
+  routes?: Record<string, EdgeRoute>;
   groups?: GroupBox[];
 }
 
@@ -169,12 +171,17 @@ export function buildSvg(input: SvgInput): { svg: string; width: number; height:
       (fk.length > 1 && fk.length === childPk.length && fk.every((c) => c?.pk));
     r.fromColumns.forEach((fc, i) => {
       const tc = r.toColumns[i];
-      const geo = edgeSidesFor(parent, pb, tc, child, cb, fc, parent.id === child.id);
+      const manual = input.routes?.[i === 0 ? r.id : `${r.id}::${i}`];
+      const geo = edgeSidesFor(parent, pb, tc, child, cb, fc, parent.id === child.id, manual);
       const sx = geo.source.x;
       const sy = geo.source.y;
       const tx = geo.target.x;
       const ty = geo.target.y;
-      const route = input.routing === false ? null : routeOrthogonal(geo.source, geo.sSide, geo.target, geo.tSide, obstacles);
+      const route = manual?.points?.length
+        ? orthogonalThrough(geo.source, geo.sSide, manual.points, geo.target, geo.tSide)
+        : input.routing === false
+          ? null
+          : routeOrthogonal(geo.source, geo.sSide, geo.target, geo.tSide, obstacles);
       const path = route
         ? roundedPath(route)
         : getSmoothStepPath({

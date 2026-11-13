@@ -23,6 +23,8 @@ export type TableNodeType = Node<TableNodeData, 'table'>;
 export interface NodeActions {
   edit(tableId: string, columnId?: string): void;
   addColumn(tableId: string): void;
+  /** Start a foreign key from this table (opens the relationship dialog). */
+  relate?(tableId: string): void;
 }
 
 export const NodeActionsContext = React.createContext<NodeActions>({ edit() {}, addColumn() {} });
@@ -50,6 +52,15 @@ function TableNodeImpl({ id, data, selected }: NodeProps<TableNodeType>) {
           <button className="icon-btn" title="Add column" onClick={(e) => (e.stopPropagation(), actions.addColumn(table.id))}>
             <PlusIcon />
           </button>
+          {actions.relate ? (
+            <button
+              className="icon-btn"
+              title="Add a foreign key from this table (or drag from a column dot to another table's column)"
+              onClick={(e) => (e.stopPropagation(), actions.relate!(table.id))}
+            >
+              <LinkIcon />
+            </button>
+          ) : null}
           <button className="icon-btn" title="Edit table" onClick={(e) => (e.stopPropagation(), actions.edit(table.id))}>
             <EditIcon />
           </button>

@@ -1,7 +1,8 @@
 // Executes the generated schema SQL on real engines and verifies the result (not part of `npm test`;
 // needs the test containers). Usage:
 //   node dist-test/dialect-integration.js [--keep-sql]
-// Env: PG_URL, MSSQL_URL (mssql://sa:pw@host:port), MYSQL_URL (mysql://root:pw@host:port)
+// Env: PG_URL, MSSQL_URL (mssql://sa:pw@host:port), MYSQL_URL (mysql://root:pw@host:port; MySQL or MariaDB),
+//      MSSQL2025_URL (optional: also runs the "SQL Server 2025" target), ENGINES (optional: comma list to run)
 import * as fs from 'fs';
 import * as path from 'path';
 import { Client } from 'pg';
@@ -9,7 +10,7 @@ import * as sql from 'mssql';
 import * as mysql from 'mysql2/promise';
 import type { SqlJsStatic } from 'sql.js';
 import { parseSql } from '../src/shared/sqlParser';
-import { ExportDialect, generateSchemaSql } from '../src/shared/sqlExport';
+import { ExportDialect, engineOf, generateSchemaSql } from '../src/shared/sqlExport';
 import { Dialect, Schema } from '../src/shared/model';
 import { buildSchema } from '../src/introspect/index';
 import { introspectPostgres } from '../src/introspect/postgres';
@@ -23,6 +24,11 @@ const initSqlJs: () => Promise<SqlJsStatic> = require('sql.js/dist/sql-asm.js');
 const PG_URL = process.env.PG_URL ?? 'postgres://postgres:test@127.0.0.1:55999';
 const MSSQL_URL = process.env.MSSQL_URL ?? 'mssql://sa:Erd_Test_Pw_2026!@127.0.0.1:51433';
 const MYSQL_URL = process.env.MYSQL_URL ?? 'mysql://root:erdtest@127.0.0.1:53306';
+const MSSQL2025_URL = process.env.MSSQL2025_URL;
+const msUrl = (id: ExportDialect) => (id === 'mssql2025' ? MSSQL2025_URL! : MSSQL_URL);
+/** Set once the MySQL-protocol server has been asked for its version. */
+let isMaria = false;
+const versions: Record<string, string> = {};
 const KEEP = process.argv.includes('--keep-sql');
 const OUT_DIR = path.join(__dirname, 'dialect-sql');
 
@@ -55,6 +61,15 @@ CREATE TABLE app.membership_log (id serial PRIMARY KEY, user_id uuid NOT NULL, g
 CREATE TABLE app.wide (id int PRIMARY KEY, ${Array.from({ length: 20 }, (_, i) => `v${i} varchar(1000)`).join(', ')});
 `;
 
+// Newest-engine features: PostgreSQL 18 uuidv7() and VIRTUAL generated columns, pgvector, json.
+const LATEST = `
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE public.docs (id uuid PRIMARY KEY DEFAULT uuidv7(), title text NOT NULL, body jsonb NOT NULL DEFAULT '{}', embedding vector(3),
+  tags text[] DEFAULT '{}', price numeric(10,2), price_with_tax numeric(10,2) GENERATED ALWAYS AS (price * 1.15) VIRTUAL);
+CREATE TABLE public.chunks (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, doc_id uuid NOT NULL REFERENCES public.docs(id) ON DELETE CASCADE,
+  n int NOT NULL, embedding vector(3) NOT NULL, UNIQUE (doc_id, n));
+`;
+
 const MSSQL_SOURCE = `
 CREATE TABLE [dbo].[Customers] ([Id] INT IDENTITY(1,1) NOT NULL, [Name] NVARCHAR(200) NOT NULL, [Notes] NVARCHAR(MAX) NULL,
   [IsVip] BIT NOT NULL DEFAULT ((0)), [Created] DATETIME2 NOT NULL DEFAULT (GETDATE()), [Guid] UNIQUEIDENTIFIER NOT NULL DEFAULT (NEWID()),
@@ -78,6 +93,7 @@ function sqlFolder(dir: string): { name: string; content: string }[] {
 const inputs: { name: string; schema: Schema }[] = [
   { name: 'edge-cases', schema: parseSql([{ name: 'edge.sql', content: EDGE_CASES }], { dialect: 'postgres' }).schema },
   { name: 'mssql-source', schema: parseSql([{ name: 'ms.sql', content: MSSQL_SOURCE }], { dialect: 'mssql' }).schema },
+  { name: 'latest-features', schema: parseSql([{ name: 'latest.sql', content: LATEST }], { dialect: 'postgres' }).schema },
 ];
 for (const [name, dir] of [
   ['contract-management', '../MPUDOH-ContractManagementTool/db'],
@@ -101,6 +117,7 @@ const pgEngine: Engine = {
   async run(db, ddl) {
     const admin = new Client({ connectionString: `${PG_URL}/postgres` });
     await admin.connect();
+    versions.postgres ??= (await admin.query('SHOW server_version')).rows[0].server_version;
     await admin.query(`DROP DATABASE IF EXISTS "${db}"`);
     await admin.query(`CREATE DATABASE "${db}"`);
     await admin.end();
@@ -115,10 +132,10 @@ const pgEngine: Engine = {
   },
 };
 
-const mssqlEngine: Engine = {
-  id: 'mssql',
+const mssqlEngine = (id: 'mssql' | 'mssql2025'): Engine => ({
+  id,
   async run(db, ddl) {
-    const base = `${MSSQL_URL}?trustServerCertificate=true&encrypt=false`;
+    const base = `${msUrl(id)}?trustServerCertificate=true&encrypt=false`;
     const u = new URL(base);
     const cfg = (database: string): sql.config => ({
       server: u.hostname,
@@ -129,6 +146,7 @@ const mssqlEngine: Engine = {
       options: { encrypt: false, trustServerCertificate: true },
     });
     const master = await new sql.ConnectionPool(cfg('master')).connect();
+    versions[id] ??= String((await master.request().query("SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(50)) AS v")).recordset[0].v);
     await master.request().batch(`IF DB_ID('${db}') IS NOT NULL BEGIN ALTER DATABASE [${db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [${db}]; END; CREATE DATABASE [${db}];`);
     await master.close();
     const pool = await new sql.ConnectionPool(cfg(db)).connect();
@@ -139,12 +157,17 @@ const mssqlEngine: Engine = {
     }
     return buildSchema('mssql', await introspectMssql(`mssql://${u.username}:${u.password}@${u.hostname}:${u.port}/${db}?encrypt=false&trustServerCertificate=true`));
   },
-};
+});
 
 const mysqlEngine: Engine = {
   id: 'mysql',
   async run(db, ddl) {
     const admin = await mysql.createConnection(MYSQL_URL);
+    if (!versions.mysql) {
+      const [[v]] = (await admin.query('SELECT VERSION() AS v')) as unknown as [{ v: string }[]];
+      versions.mysql = v.v;
+      isMaria = /mariadb/i.test(v.v);
+    }
     await admin.query(`DROP DATABASE IF EXISTS \`${db}\``);
     await admin.query(`CREATE DATABASE \`${db}\` DEFAULT CHARACTER SET utf8mb4`);
     await admin.end();
@@ -235,12 +258,14 @@ function diff(label: string, a: ReturnType<typeof structure>, b: ReturnType<type
 /** Declared types and FK actions in the generated SQL (parsed back) must match what the engine reports. */
 function typesAndActions(declared: Schema, live: Schema, engine: ExportDialect): string[] {
   const out: string[] = [];
-  const key = (t: { schema: string; name: string }) => (engine === 'postgres' || engine === 'mssql' ? `${t.schema}.${t.name}` : t.name).toLowerCase();
+  const fam = engineOf(engine);
+  const key = (t: { schema: string; name: string }) => (fam === 'postgres' || fam === 'mssql' ? `${t.schema}.${t.name}` : t.name).toLowerCase();
   const liveT = new Map(live.tables.map((t) => [key(t), t]));
   const canon = (t: string) => {
     let x = norm(t);
-    if (engine === 'mssql') x = x.replace(/^(datetime2|datetimeoffset|time)\(7\)$/, '$1');
-    if (engine === 'mysql') x = x.replace(/^(boolean|bool)$/, 'tinyint(1)');
+    if (fam === 'mssql') x = x.replace(/^(datetime2|datetimeoffset|time)\(7\)$/, '$1');
+    if (fam === 'mysql') x = x.replace(/^(boolean|bool)$/, 'tinyint(1)');
+    if (fam === 'mysql' && isMaria) x = x.replace(/^json$/, 'longtext'); // MariaDB's JSON is an alias of LONGTEXT + JSON_VALID
     if (engine === 'postgres')
       x = x
         .replace(/^timestamptz/, 'timestampwithtimezone')
@@ -281,7 +306,7 @@ function typesAndActions(declared: Schema, live: Schema, engine: ExportDialect):
 // Data checks: defaults produce values, cascades delete, enum constraints reject bad values.
 
 async function query(engine: ExportDialect, db: string, text: string): Promise<Record<string, unknown>[]> {
-  switch (engine) {
+  switch (engineOf(engine)) {
     case 'postgres': {
       const c = new Client({ connectionString: `${PG_URL}/${db}` });
       await c.connect();
@@ -292,7 +317,7 @@ async function query(engine: ExportDialect, db: string, text: string): Promise<R
       }
     }
     case 'mssql': {
-      const u = new URL(MSSQL_URL);
+      const u = new URL(msUrl(engine));
       const pool = await new sql.ConnectionPool({
         server: u.hostname,
         port: Number(u.port),
@@ -333,8 +358,8 @@ async function dataChecks(engine: ExportDialect, db: string): Promise<string[]> 
       mssql: `[${schema === 'public' ? 'dbo' : schema}].[${name}]`,
       mysql: `\`${name === 'users' && schema === 'app' ? 'app_users' : name}\``,
       sqlite: `"${name === 'users' && schema === 'app' ? 'app_users' : name}"`,
-    })[engine];
-  const s = (v: string) => (engine === 'mssql' ? `N'${v}'` : `'${v}'`);
+    })[engineOf(engine)];
+  const s = (v: string) => (engineOf(engine) === 'mssql' ? `N'${v}'` : `'${v}'`);
 
   await query(engine, db, `INSERT INTO ${t('public', 'users')} (email) VALUES (${s('x@example.com')})`);
   const [row] = await query(engine, db, `SELECT id, active, small, prefs, tags, created_at FROM ${t('public', 'users')}`);
@@ -362,15 +387,53 @@ async function dataChecks(engine: ExportDialect, db: string): Promise<string[]> 
   return problems;
 }
 
+/** uuidv7 default, vector values, json default, cascade; the virtual generated column on PostgreSQL. */
+async function dataChecksLatest(engine: ExportDialect, db: string): Promise<string[]> {
+  const problems: string[] = [];
+  const fam = engineOf(engine);
+  const t = (name: string) => ({ postgres: `public."${name}"`, mssql: `[dbo].[${name}]`, mysql: `\`${name}\``, sqlite: `"${name}"` })[fam];
+  const s = (v: string) => (fam === 'mssql' ? `N'${v}'` : `'${v}'`);
+  await query(engine, db, `INSERT INTO ${t('docs')} (title, embedding, price) VALUES (${s('a')}, '[1,2,3]', 10)`);
+  const [doc] = await query(engine, db, `SELECT * FROM ${t('docs')}`);
+  const id = String(doc?.id ?? '');
+  if (!/^[0-9a-f-]{32,36}$/i.test(id)) problems.push(`data: uuid default looks wrong: "${id}"`);
+  if (fam === 'postgres' && id[14] !== '7') problems.push(`data: PostgreSQL 18 uuidv7() should give a version-7 uuid, got ${id}`);
+  const body = typeof doc?.body === 'string' ? doc.body : JSON.stringify(doc?.body);
+  if (body.replace(/\s/g, '') !== '{}') problems.push(`data: json default '{}' became ${body}`);
+  const emb = String(typeof doc?.embedding === 'string' ? doc.embedding : JSON.stringify(doc?.embedding)).replace(/\s|\.0+(?=[,\]])|e\+0+/g, '');
+  if (!/^\[1(\.0*)?,2(\.0*)?,3(\.0*)?\]$/.test(emb)) problems.push(`data: vector [1,2,3] read back as ${emb}`);
+  if (fam === 'postgres' && Number(doc?.price_with_tax) !== 11.5) problems.push(`data: virtual generated column gave ${doc?.price_with_tax}`);
+  const idLit = fam === 'mssql' ? `'${id}'` : `'${id}'`;
+  await query(engine, db, `INSERT INTO ${t('chunks')} (doc_id, n, embedding) VALUES (${idLit}, 1, '[0.5,0.25,1]')`);
+  await query(engine, db, `DELETE FROM ${t('docs')}`);
+  const [cnt] = await query(engine, db, `SELECT COUNT(*) AS n FROM ${t('chunks')}`);
+  if (Number(cnt?.n) !== 0) problems.push('data: ON DELETE CASCADE docs → chunks did not delete the chunk');
+  return problems;
+}
+
 // ---------------------------------------------------------------------------
 
 async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const engines = [pgEngine, mssqlEngine, mysqlEngine, sqliteEngine];
+  const only = process.env.ENGINES ? process.env.ENGINES.split(',').map((x) => x.trim()) : undefined;
+  const engines = [pgEngine, mssqlEngine('mssql'), ...(MSSQL2025_URL ? [mssqlEngine('mssql2025')] : []), mysqlEngine, sqliteEngine].filter(
+    (e) => !only || only.includes(e.id),
+  );
   let failures = 0;
   for (const input of inputs) {
     for (const engine of engines) {
       const label = `${input.name} → ${engine.id}`;
+      if (input.name === 'latest-features' && engine.id === 'postgres') {
+        const c = new Client({ connectionString: `${PG_URL}/postgres` });
+        await c.connect();
+        const num = Number((await c.query('SHOW server_version_num')).rows[0].server_version_num);
+        const vec = (await c.query("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")).rowCount;
+        await c.end();
+        if (num < 180000 || !vec) {
+          console.log(`SKIP ${label}: needs PostgreSQL 18 with pgvector (server is ${num}${vec ? '' : ', no pgvector'})`);
+          continue;
+        }
+      }
       const ddl = generateSchemaSql(input.schema, engine.id, { sourceLabel: input.name });
       const file = path.join(OUT_DIR, `${input.name}.${engine.id}.sql`);
       fs.writeFileSync(file, ddl);
@@ -384,6 +447,7 @@ async function main() {
         continue;
       }
       const flatten = engine.id === 'mysql' || engine.id === 'sqlite';
+      const family = engineOf(engine.id);
       const problems = [
         ...diff(
           'model vs engine',
@@ -392,10 +456,17 @@ async function main() {
           'model',
           engine.id,
         ),
-        ...typesAndActions(parseSql([{ name: file, content: ddl }], { dialect: engine.id as Dialect }).schema, live, engine.id),
+        ...typesAndActions(parseSql([{ name: file, content: ddl }], { dialect: family as Dialect }).schema, live, engine.id),
       ];
       // Expected, documented differences
       const filtered = problems;
+      if (input.name === 'latest-features') {
+        try {
+          filtered.push(...(await dataChecksLatest(engine.id, `erd_${input.name.replace(/-/g, '_')}`)));
+        } catch (e) {
+          filtered.push(`data check crashed: ${(e as Error).message}`);
+        }
+      }
       if (input.name === 'edge-cases') {
         try {
           filtered.push(...(await dataChecks(engine.id, `erd_${input.name.replace(/-/g, '_')}`)));
@@ -415,6 +486,7 @@ async function main() {
       if (!KEEP) fs.rmSync(file);
     }
   }
+  console.log(`Engines: ${Object.entries(versions).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
   process.exitCode = failures ? 1 : 0;
 }
 

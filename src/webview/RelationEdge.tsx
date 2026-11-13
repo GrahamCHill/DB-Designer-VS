@@ -1,7 +1,8 @@
 import React, { memo, useContext, useMemo } from 'react';
-import { BaseEdge, Edge, EdgeLabelRenderer, EdgeProps, Position, getSmoothStepPath } from '@xyflow/react';
+import { BaseEdge, Edge, EdgeLabelRenderer, EdgeProps, Position, getSmoothStepPath, useReactFlow } from '@xyflow/react';
+import type { EdgeRoute } from '../shared/model';
 import { CloseIcon } from './icons';
-import { Pt, Rect, midpoint, roundedPath, routeOrthogonal } from './router';
+import { Pt, Rect, Side, midpoint, orthogonalThrough, roundedPath, routeOrthogonal, simplify, snap, toWaypoints } from './router';
 
 /** Table rectangles the lines should avoid; `version` changes whenever they move. */
 export const RouterContext = React.createContext<{ rects: Rect[]; version: number; enabled: boolean }>({ rects: [], version: 0, enabled: false });
@@ -29,11 +30,21 @@ export interface RelationEdgeData extends Record<string, unknown> {
   dimmed: boolean;
   /** One of its tables is being dragged: draw a simple line until the drag ends. */
   moving?: boolean;
+  /** The user's own shape for this line (sides and bend points), if any. */
+  route?: EdgeRoute;
+  editable?: boolean;
 }
 
 export type RelationEdgeType = Edge<RelationEdgeData, 'relation'>;
 
-export const EdgeActionsContext = React.createContext<{ remove(id: string): void }>({ remove() {} });
+export interface EdgeActions {
+  remove(id: string): void;
+  /** Called once before a line is changed by hand (records an undo step). */
+  beginEdit(id: string): void;
+  setRoute(id: string, route: EdgeRoute | undefined): void;
+}
+
+export const EdgeActionsContext = React.createContext<EdgeActions>({ remove() {}, beginEdit() {}, setRoute() {} });
 
 function offset(x: number, y: number, pos: Position, d: number): [number, number] {
   switch (pos) {
@@ -48,6 +59,19 @@ function offset(x: number, y: number, pos: Position, d: number): [number, number
   }
 }
 
+const sideOf = (p: Position): Side => (p === Position.Right ? 'R' : 'L');
+
+/** A handle on the line: drag to reshape; `dbl` runs on double-click. */
+interface Grip {
+  key: string;
+  at: Pt;
+  kind: 'seg-h' | 'seg-v' | 'bend' | 'add';
+  title: string;
+  /** New waypoints for a pointer position (flow coordinates, snapped). */
+  apply(p: Pt): Pt[];
+  dbl?(): void;
+}
+
 /**
  * The edge runs from the referenced (parent / PK) column to the referencing (child / FK) column.
  * The parent end carries a "PK · 1" chip and a bar; the child end an "FK · N" chip and a crow's foot.
@@ -55,20 +79,21 @@ function offset(x: number, y: number, pos: Position, d: number): [number, number
 function RelationEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected }: EdgeProps<RelationEdgeType>) {
   const actions = useContext(EdgeActionsContext);
   const router = useContext(RouterContext);
-  const useRoute = router.enabled && !data?.moving && (sourcePosition === Position.Left || sourcePosition === Position.Right);
-  const route = useMemo(() => {
+  const rf = useReactFlow();
+  const horizontal = (sourcePosition === Position.Left || sourcePosition === Position.Right) && (targetPosition === Position.Left || targetPosition === Position.Right);
+  const s: Pt = { x: Math.round(sourceX), y: Math.round(sourceY) };
+  const t: Pt = { x: Math.round(targetX), y: Math.round(targetY) };
+  const sSide = sideOf(sourcePosition);
+  const tSide = sideOf(targetPosition);
+  const manual = data?.route?.points?.length ? data.route.points : undefined;
+  const useRoute = !manual && router.enabled && !data?.moving && horizontal;
+  const auto = useMemo(() => {
     if (!useRoute) return null;
-    const key = `${id}|${router.version}|${Math.round(sourceX)},${Math.round(sourceY)},${Math.round(targetX)},${Math.round(targetY)}|${sourcePosition}${targetPosition}`;
-    return cachedRoute(key, () =>
-      routeOrthogonal(
-        { x: Math.round(sourceX), y: Math.round(sourceY) },
-        sourcePosition === Position.Right ? 'R' : 'L',
-        { x: Math.round(targetX), y: Math.round(targetY) },
-        targetPosition === Position.Right ? 'R' : 'L',
-        router.rects,
-      ),
-    );
-  }, [useRoute, id, router.version, router.rects, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition]);
+    const key = `${id}|${router.version}|${s.x},${s.y},${t.x},${t.y}|${sourcePosition}${targetPosition}`;
+    return cachedRoute(key, () => routeOrthogonal(s, sSide, t, tSide, router.rects));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useRoute, id, router.version, router.rects, s.x, s.y, t.x, t.y, sourcePosition, targetPosition]);
+  const route = manual && horizontal ? orthogonalThrough(s, sSide, manual, t, tSide) : auto;
   const [stepPath, stepX, stepY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -88,6 +113,102 @@ function RelationEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePositi
   const [px, py] = offset(sourceX, sourceY, sourcePosition, 24);
   const [cx, cy] = offset(targetX, targetY, targetPosition, 24);
   const markerSuffix = active ? '-active' : '';
+  const editing = !!selected && !!data?.editable && horizontal;
+
+  // The line as drawn, as an orthogonal polyline (direct lines are approximated by a step through the middle).
+  const full: Pt[] = route ?? orthogonalThrough(s, sSide, [], t, tSide);
+
+  const grips: Grip[] = [];
+  if (editing) {
+    const pts = simplify(full);
+    const corners = pts.slice(1, -1);
+    for (let k = 0; k < pts.length - 1; k++) {
+      const a = pts[k];
+      const b = pts[k + 1];
+      const len = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      if (len < 28) continue;
+      const at = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const isEnd = k === 0 || k === pts.length - 2;
+      if (isEnd) {
+        // Segments touching a table stay on the column's row: dragging one adds a bend point instead.
+        const first = k === 0;
+        const base = manual ?? toWaypoints(pts);
+        grips.push({
+          key: `add${k}`,
+          at,
+          kind: 'add',
+          title: 'Drag to add a bend',
+          apply: (p) => (first ? [p, ...base] : [...base, p]),
+        });
+        continue;
+      }
+      const isH = a.y === b.y;
+      // Interior segment k joins corners k-1 and k: slide it sideways.
+      grips.push({
+        key: `seg${k}`,
+        at,
+        kind: isH ? 'seg-h' : 'seg-v',
+        title: isH ? 'Drag up or down to move this part of the line' : 'Drag left or right to move this part of the line',
+        apply: (p) => {
+          const c = corners.map((q) => ({ ...q }));
+          if (isH) c[k - 1].y = c[k].y = p.y;
+          else c[k - 1].x = c[k].x = p.x;
+          return toWaypoints([s, ...c, t]);
+        },
+      });
+    }
+    (manual ?? []).forEach((w, i) =>
+      grips.push({
+        key: `bend${i}`,
+        at: w,
+        kind: 'bend',
+        title: 'Drag to move this bend; double-click to remove it',
+        apply: (p) => manual!.map((q, j) => (j === i ? p : q)),
+        dbl: () => {
+          actions.beginEdit(id);
+          const rest = manual!.filter((_, j) => j !== i);
+          actions.setRoute(id, { ...data?.route, points: rest.length ? rest : undefined });
+        },
+      }),
+    );
+  }
+
+  const startDrag = (g: Grip) => (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    let started = false;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const move = (ev: PointerEvent) => {
+      if (!started) {
+        if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) < 3) return;
+        started = true;
+        actions.beginEdit(id);
+      }
+      const p = snap(rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY }));
+      actions.setRoute(id, { ...data?.route, points: g.apply(p) });
+    };
+    const up = (ev: PointerEvent) => {
+      el.releasePointerCapture(ev.pointerId);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  };
+
+  const flip = (end: 's' | 't') => {
+    actions.beginEdit(id);
+    const cur = end === 's' ? sSide : tSide;
+    // The hand-drawn bends were made for the old side; start from an automatic route again.
+    actions.setRoute(id, { ...data?.route, points: undefined, [end]: cur === 'R' ? 'L' : 'R' });
+  };
+
   return (
     <>
       <BaseEdge
@@ -105,12 +226,50 @@ function RelationEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePositi
         <div className={`erd-edge-chip fk ${state}`} style={{ transform: `translate(-50%, -135%) translate(${cx}px, ${cy}px)` }}>
           FK
         </div>
+        {grips.map((g) => (
+          <div
+            key={g.key}
+            className={`erd-edge-grip ${g.kind} nodrag nopan`}
+            title={g.title}
+            style={{ transform: `translate(-50%, -50%) translate(${g.at.x}px, ${g.at.y}px)` }}
+            onPointerDown={startDrag(g)}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              g.dbl?.();
+            }}
+          />
+        ))}
         {selected || data?.hovered ? (
-          <div className="erd-edge-label nodrag nopan" style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}>
+          <div
+            className="erd-edge-label nodrag nopan"
+            style={{ transform: `translate(-50%, ${editing ? '-160%' : '-50%'}) translate(${labelX}px, ${labelY}px)` }}
+          >
             <span className="mono">{data?.label}</span>
             <span className="erd-edge-card">1 : {data?.childCard}</span>
             {data?.onDelete && data.onDelete !== 'NO ACTION' ? <span className="erd-edge-action">on delete {data.onDelete.toLowerCase()}</span> : null}
-            {selected ? (
+            {editing ? (
+              <>
+                <button className="btn mini" title="Attach the line to the other side of the referenced (PK) table" onClick={() => flip('s')}>
+                  ⇄ PK side
+                </button>
+                <button className="btn mini" title="Attach the line to the other side of the referencing (FK) table" onClick={() => flip('t')}>
+                  ⇄ FK side
+                </button>
+                {data?.route ? (
+                  <button
+                    className="btn mini"
+                    title="Forget the manual shape and route this line automatically"
+                    onClick={() => {
+                      actions.beginEdit(id);
+                      actions.setRoute(id, undefined);
+                    }}
+                  >
+                    Reset
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+            {selected && data?.editable !== false ? (
               <button className="icon-btn danger" title="Delete foreign key (Del)" onClick={() => actions.remove(id)}>
                 <CloseIcon size={11} />
               </button>

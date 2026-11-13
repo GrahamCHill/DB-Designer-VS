@@ -85,3 +85,25 @@ test('sample: every dialect validates cleanly', { skip: !fs.existsSync(SAMPLE) &
     assert.equal(v.ok, true, `${d.id}: ${v.errors.slice(0, 3).join('\n')}`);
   }
 });
+
+test('PostgreSQL 18 features (uuidv7, VIRTUAL generated columns) validate on PGlite 17 by emulation', async () => {
+  const s = pg(`
+    CREATE TABLE public.orders (id uuid PRIMARY KEY DEFAULT uuidv7(), price numeric(10,2) NOT NULL,
+      price_with_tax numeric(10,2) GENERATED ALWAYS AS (price * 1.15) VIRTUAL);
+  `);
+  const sql = generateFullSql(s);
+  assert.match(sql, /DEFAULT uuidv7\(\)/);
+  assert.match(sql, /GENERATED ALWAYS AS \(price \* 1\.15\) VIRTUAL/);
+  const r = await verifyExport({ schema: s, target: 'postgres', mode: 'full', sql, pgliteDir: PGLITE });
+  assert.ok(r.ok, r.errors.join('\n'));
+  assert.match(r.summary, /PostgreSQL 18 features emulated: uuidv7\(\)\/uuidv4\(\), virtual generated columns/);
+});
+
+test('SQL Server 2025 target validates and is offered next to SQL Server', async () => {
+  const s = pg(`CREATE TABLE public.docs (id int PRIMARY KEY, body jsonb NOT NULL DEFAULT '{}', emb vector(3));`);
+  assert.ok(EXPORT_DIALECTS.some((d) => d.id === 'mssql2025'));
+  const sql = generateSchemaSql(s, 'mssql2025');
+  const r = await verifyExport({ schema: s, target: 'mssql2025', mode: 'full', sql, pgliteDir: PGLITE });
+  assert.ok(r.ok, r.errors.join('\n'));
+  assert.deepEqual(structuralCheck(s, sql, 'mssql2025'), []);
+});

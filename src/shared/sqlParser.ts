@@ -909,6 +909,7 @@ class Builder {
     if (head.k === 'word') {
       if (TABLE_CONSTRAINT_START.has(head.u)) return this.tableConstraint(table, new Cur(el));
       if (this.dialect === 'mysql' && MYSQL_INDEX_START.has(head.u)) return; // plain index
+      if (head.u === 'VECTOR' && (el[1]?.u === 'INDEX' || el[1]?.u === 'KEY')) return; // MariaDB vector index
       if (head.u === 'LIKE') return this.likeClause(table, new Cur(el));
       if (head.u === 'INDEX' && el[2]?.v === '(') return; // T-SQL inline index
     }
@@ -1056,9 +1057,10 @@ class Builder {
         }
         if (c.accept('AS')) {
           const expr = c.parens();
-          if (expr) col.default = `GENERATED ALWAYS AS (${joinTokens(expr)}) STORED`;
-          c.accept('STORED');
-          c.accept('VIRTUAL');
+          // PostgreSQL 18 adds VIRTUAL generated columns; keep the kind for PostgreSQL sources.
+          const virtual = c.accept('VIRTUAL');
+          if (!virtual) c.accept('STORED');
+          if (expr) col.default = `GENERATED ALWAYS AS (${joinTokens(expr)}) ${virtual && this.dialect === 'postgres' ? 'VIRTUAL' : 'STORED'}`;
         }
         continue;
       }

@@ -36,8 +36,11 @@ export function edgeSidesFor(
   cb: Box,
   childColumn: string,
   selfRef: boolean,
+  override?: { s?: Side; t?: Side },
 ): { source: Pt; sSide: Side; target: Pt; tSide: Side } {
-  const { s, t } = edgeSides(pb, cb, selfRef);
+  const auto = edgeSides(pb, cb, selfRef);
+  const s = override?.s ?? auto.s;
+  const t = override?.t ?? auto.t;
   return {
     source: { x: s === 'R' ? pb.x + pb.w + HANDLE_OUT : pb.x - HANDLE_OUT, y: columnY(parent, pb, parentColumn) },
     sSide: s,

@@ -5,11 +5,17 @@
 import { Column, Relation, Schema, Table, UserType } from './model';
 import { generateFullSql, pgSchemaName, toPostgresDefault, toPostgresType } from './pgExport';
 
-export type ExportDialect = 'postgres' | 'mssql' | 'mysql' | 'sqlite';
+export type ExportDialect = 'postgres' | 'mssql' | 'mssql2025' | 'mysql' | 'sqlite';
+
+/** The engine family an export target belongs to (SQL Server 2025 is SQL Server with newer types). */
+export function engineOf(d: ExportDialect): 'postgres' | 'mssql' | 'mysql' | 'sqlite' {
+  return d === 'mssql2025' ? 'mssql' : d;
+}
 
 export const EXPORT_DIALECTS: { id: ExportDialect; label: string; ext: string }[] = [
   { id: 'postgres', label: 'PostgreSQL', ext: 'pg' },
   { id: 'mssql', label: 'SQL Server', ext: 'mssql' },
+  { id: 'mssql2025', label: 'SQL Server 2025', ext: 'mssql2025' },
   { id: 'mysql', label: 'MySQL / MariaDB', ext: 'mysql' },
   { id: 'sqlite', label: 'SQLite', ext: 'sqlite' },
 ];
@@ -26,6 +32,8 @@ export function generateSchemaSql(schema: Schema, target: ExportDialect, opts: E
       return generateFullSql(schema, opts);
     case 'mssql':
       return new MssqlWriter(schema, opts).write();
+    case 'mssql2025':
+      return new MssqlWriter(schema, opts, 2025).write();
     case 'mysql':
       return new MysqlWriter(schema, opts).write();
     case 'sqlite':
@@ -61,6 +69,7 @@ export type PgKind =
   | 'inet'
   | 'xml'
   | 'tsvector'
+  | 'vector'
   | 'enum'
   | 'other';
 
@@ -101,6 +110,7 @@ const KIND_ALIASES: [RegExp, PgKind][] = [
   [/^(inet|cidr|macaddr|macaddr8)$/, 'inet'],
   [/^xml$/, 'xml'],
   [/^(tsvector|tsquery)$/, 'tsvector'],
+  [/^(vector|halfvec)$/, 'vector'],
 ];
 
 function findUserType(types: UserType[] | undefined, typeText: string): UserType | undefined {
@@ -126,7 +136,7 @@ export function canonicalType(col: Column, schema: Schema, depth = 0): PgType {
   const kind = KIND_ALIASES.find(([re]) => re.test(baseRaw))?.[1] ?? 'other';
   const serial = /serial/.test(baseRaw);
   const out: PgType = { kind, array, serial, text };
-  if (kind === 'varchar' || kind === 'char') out.length = args[0];
+  if (kind === 'varchar' || kind === 'char' || kind === 'vector') out.length = args[0];
   if (kind === 'numeric') {
     out.precision = args[0];
     out.scale = args[1];
@@ -172,7 +182,7 @@ export function canonicalDefault(col: Column, schema: Schema): DefaultValue | un
   if (/^(now\s*\(\s*\)|current_timestamp(\s*\(\s*\d*\s*\))?|localtimestamp|transaction_timestamp\s*\(\s*\)|statement_timestamp\s*\(\s*\)|clock_timestamp\s*\(\s*\)|timezone\s*\(\s*'utc'\s*,\s*now\s*\(\s*\)\s*\))$/i.test(e))
     return { kind: 'now' };
   if (/^(current_date|\('now'\)::date)$/i.test(e)) return { kind: 'today' };
-  if (/^(gen_random_uuid|uuid_generate_v4|uuid_generate_v1|newid)\s*\(\s*\)$/i.test(e)) return { kind: 'uuid' };
+  if (/^(gen_random_uuid|uuidv4|uuidv7|uuid_generate_v4|uuid_generate_v1|newid|newsequentialid|uuid)\s*\(\s*\)$/i.test(e)) return { kind: 'uuid' };
   if (/^true$/i.test(e)) return { kind: 'bool', value: true };
   if (/^false$/i.test(e)) return { kind: 'bool', value: false };
   if (/^null$/i.test(e)) return { kind: 'null' };
@@ -304,7 +314,14 @@ const sqlString = (s: string) => `'${s.replace(/'/g, "''")}'`;
 // ---------------------------------------------------------------------------
 
 class MssqlWriter extends Writer {
-  protected dialectName = 'SQL Server';
+  protected dialectName: string;
+  /** 2025 adds native json and vector(n) types. */
+  private readonly v2025: boolean;
+  constructor(schema: Schema, opts: ExportOptions, version: 2022 | 2025 = 2022) {
+    super(schema, opts);
+    this.v2025 = version === 2025;
+    this.dialectName = this.v2025 ? 'SQL Server 2025' : 'SQL Server';
+  }
   protected maxNameLength = 128;
   protected q(n: string) {
     return `[${n.replace(/]/g, ']]')}]`;
@@ -324,6 +341,10 @@ class MssqlWriter extends Writer {
       return len && len <= 4000 ? `nvarchar(${len})` : 'nvarchar(max)';
     };
     if (pt.array) {
+      if (this.v2025 && !key) {
+        notes.push(`${c.name}: ${pt.text}[] stored as a JSON array (json)`);
+        return { type: 'json' };
+      }
       notes.push(`${c.name}: ${pt.text}[] stored as JSON text (nvarchar(max))`);
       return { type: key ? 'nvarchar(450)' : 'nvarchar(max)' };
     }
@@ -370,6 +391,15 @@ class MssqlWriter extends Writer {
         notes.push(`${c.name}: interval has no equivalent; stored as text (nvarchar(100))`);
         return { type: 'nvarchar(100)' };
       case 'json':
+        if (this.v2025 && !key) return { type: 'json' };
+        return { type: key ? 'nvarchar(450)' : 'nvarchar(max)', check: `ISJSON(${this.q(c.name)}) = 1` };
+      case 'vector':
+        if (this.v2025 && !key && pt.length && pt.length <= 1998) return { type: `vector(${pt.length})` };
+        notes.push(
+          this.v2025
+            ? `${c.name}: ${pt.text} can't be a SQL Server vector (needs 1–1998 dimensions, not a key); stored as a JSON array`
+            : `${c.name}: ${pt.text} stored as a JSON array in nvarchar(max) (SQL Server 2025 has a native vector type)`,
+        );
         return { type: key ? 'nvarchar(450)' : 'nvarchar(max)', check: `ISJSON(${this.q(c.name)}) = 1` };
       case 'bytea':
         return { type: key ? 'varbinary(900)' : 'varbinary(max)' };
@@ -706,6 +736,9 @@ class MysqlWriter extends Writer {
         return 'varchar(100)';
       case 'json':
         return key ? 'varchar(255)' : 'json';
+      case 'vector':
+        notes.push(`${c.name}: ${pt.text} stored as a JSON array (MySQL 9 VECTOR and MariaDB VECTOR are not interchangeable)`);
+        return key ? 'varchar(255)' : 'json';
       case 'bytea':
         return key ? 'varbinary(255)' : 'longblob';
       case 'inet':
@@ -906,6 +939,9 @@ class SqliteWriter extends Writer {
         // SQLite stores dates as ISO-8601 text; keep the declared type so tools can still tell.
         return { type: { date: 'DATE', time: 'TIME', timetz: 'TIME', timestamp: 'DATETIME', timestamptz: 'DATETIME' }[pt.kind] };
       case 'json':
+        return { type: 'TEXT', check: `${this.q(c.name)} IS NULL OR json_valid(${this.q(c.name)})` };
+      case 'vector':
+        notes.push(`${c.name}: ${pt.text} stored as a JSON array in TEXT`);
         return { type: 'TEXT', check: `${this.q(c.name)} IS NULL OR json_valid(${this.q(c.name)})` };
       case 'enum':
         return { type: 'TEXT', check: pt.enumValues?.length ? `${this.q(c.name)} IN (${pt.enumValues.map(sqlString).join(', ')})` : undefined };

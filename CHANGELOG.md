@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0
+
+- **Shape relationship lines by hand.** Select a line to get handles. Slide its segments, add bends and move them (snapped to a grid), or double-click a bend to remove it. **⇄ PK side** / **⇄ FK side** move an end to the other side of its table, and **Reset** returns the line to automatic routing. Line shapes are saved with the diagram, in `.erd.json`, the HTML viewer and image exports.
+- **Undo/redo for everything**: Ctrl+Z, Ctrl+Shift+Z (or Ctrl+Y; ⌘ on macOS). This now covers moving tables, auto layout, groups and line shapes, as well as schema edits.
+- **+ Relation removed from the toolbar.** Each table header now has a link button that opens the relationship dialog for that table. Dragging between column dots still works.
+- **Latest engine versions.**
+  - New **SQL Server 2025** export target, with native `json` and `vector(n)`.
+  - PostgreSQL 18 support: `uuidv7()`/`uuidv4()` defaults and `VIRTUAL` generated columns are parsed, exported, and emulated during PGlite validation.
+  - pgvector `vector(n)` maps to the closest type in every target.
+  - The parser accepts MariaDB `VECTOR INDEX`.
+  - Live connections read SQL Server 2025 `vector(n)`, PostgreSQL generated columns, and MariaDB's integer display widths.
+  - PostgreSQL types are shown with their short names (`timestamptz`, `varchar(n)`).
+  - Verified on PostgreSQL 16 and 18 (+pgvector), SQL Server 2022 and 2025, MySQL 8.4 and 9.7, MariaDB 13.0 and SQLite. CI now runs a matrix of the oldest and latest versions.
+- Database connections are strictly read-only. PostgreSQL uses a read-only session and transaction, verified before reading. MySQL uses `START TRANSACTION READ ONLY`. SQL Server reads inside a transaction that is always rolled back.
+
 ## 0.4.0: DB Designer VS
 
 - **Renamed to DB Designer VS.** Command IDs and settings moved from `erdViewer.*` to `dbDesigner.*`. `.erd.json` files from earlier versions still open.

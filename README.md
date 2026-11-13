@@ -7,7 +7,7 @@ Interactive, editable entity-relationship diagrams, with Supabase-style behaviou
 - **a folder or set of `.sql` files**: migrations are replayed in natural name order (`00-init.sql`, `01-…`, `10-…`), or
 - **a live database**: PostgreSQL, SQL Server, MySQL/MariaDB or a SQLite file.
 
-The diagram works in **PostgreSQL** terms. You can export the full schema as **PostgreSQL, SQL Server, MySQL/MariaDB or SQLite**, with each type converted to its closest equivalent. You can also export a PostgreSQL migration containing only the changes you made in the diagram.
+The diagram works in **PostgreSQL** terms. You can export the full schema as **PostgreSQL, SQL Server (2016–2022 or 2025), MySQL/MariaDB or SQLite**, with each type converted to its closest equivalent. You can also export a PostgreSQL migration containing only the changes you made in the diagram.
 
 ## Using it
 
@@ -52,6 +52,12 @@ For live PostgreSQL connections, Supabase's internal schemas (`auth`, `storage`,
 ### Lines and layout
 
 - **Lines: routed** (the default) draws each relationship as an orthogonal path that goes *around* tables instead of under them. The path is found with an A* search over the corridors between tables, with a penalty for bends. Click the button to switch to direct lines. While you drag, the lines attached to the moving tables are drawn directly, and they re-route when you drop.
+- **Shape a line by hand**: click a line to select it. Handles appear on it:
+  - a bar on each middle segment: drag it to slide that part of the line sideways (snapped to a 10px grid);
+  - a dashed dot on the first and last segment: drag it to add a bend;
+  - a round dot on each bend you added: drag it to move the bend, or double-click it to remove it.
+
+  The selected line's label also has **⇄ PK side** / **⇄ FK side**, which attach that end to the other side of its table, and **Reset**, which returns the line to automatic routing. A hand-shaped line keeps its bends when tables move, and its ends stay on their columns. Line shapes are saved with the diagram, in `.erd.json` files, the HTML viewer and image exports.
 - **Auto layout** spaces tables out with wide corridors so routed lines have room. Groups are kept intact and moved as blocks.
 
 ### Groups
@@ -66,7 +72,7 @@ Like DB-Designer, you can wrap related tables in coloured groups:
 
 ### Editing
 
-- **+ Relation** opens the relationship dialog. You can also drag from a column's dot (visible when you hover a table) to another column. The dialog lets you:
+- The **link** button on a table header opens the relationship dialog with that table as the FK (child) side. You can also drag from a column's dot (visible when you hover a table) to another column. The dialog lets you:
   - choose **many-to-one**, **one-to-one** (the FK column becomes unique), or **many-to-many** (creates a join table with a composite PK and two FKs);
   - pick an existing FK column, or **+ New column…**, which suggests e.g. `user_id` with the referenced column's type;
   - set ON DELETE / ON UPDATE.
@@ -76,7 +82,7 @@ Like DB-Designer, you can wrap related tables in coloured groups:
 - **+** on a table header adds a column. **✎**, or double-clicking a table or column, opens the editor panel. There you can rename, change type, PK, nullable, unique, identity, default and description, set an FK reference with ON DELETE/UPDATE, reorder or delete columns, and delete the table.
 - **Drag from a column's edge dot to another column** to create a foreign key. If one side is a PK/unique column, it becomes the referenced side.
 - Select a relation line and press **Delete** to drop that FK.
-- **Undo/Redo**: Ctrl+Z / Ctrl+Y.
+- **Undo/Redo**: **Ctrl+Z** / **Ctrl+Shift+Z** (Ctrl+Y also redoes; ⌘ on macOS), or the ↶ ↷ toolbar buttons. Undo covers schema edits, moving tables, auto layout, groups (add, rename, recolour, resize, delete) and line shapes. Up to 200 steps; typing in one field within 1.5 s is one step.
 - Edits are kept as a draft per source, and survive closing the tab. **Discard edits** reverts to the source. **Reload** re-reads it. SQL-file sources reload automatically when files change, unless you have draft edits.
 
 ### Export SQL
@@ -85,18 +91,18 @@ Like DB-Designer, you can wrap related tables in coloured groups:
 
 | Target | How it is checked |
 |---|---|
-| PostgreSQL | **Executed** in PostgreSQL 17, running in-process via PGlite (WebAssembly). The `uuid-ossp`, `pgcrypto` and `citext` extensions are included. A migration is run on top of the starting schema. |
+| PostgreSQL | **Executed** in PostgreSQL 17, running in-process via PGlite (WebAssembly). The `uuid-ossp`, `pgcrypto` and `citext` extensions are included. A migration is run on top of the starting schema. PostgreSQL 18 features are emulated and named in the result: `uuidv7()` / `uuidv4()`, and `VIRTUAL` generated columns (checked as stored). Output that needs another extension, such as `vector`, is not executed; the model rules still run. |
 | SQLite | **Executed** in SQLite (sql.js), followed by `PRAGMA foreign_key_check` and `integrity_check`. |
-| SQL Server, MySQL | Re-read with the parser and compared with the diagram (every table, column, primary key and foreign key), plus syntax balance checks. These engines can't run inside VS Code; CI runs the same exports on real SQL Server 2022 and MySQL 8.4. |
+| SQL Server, MySQL | Re-read with the parser and compared with the diagram (every table, column, primary key and foreign key), plus syntax balance checks. These engines can't run inside VS Code; CI runs the same exports on real engines (see [Supported engine versions](#supported-engine-versions)). |
 | All | Model rules: empty or duplicate names, identifiers over the engine's length limit, FKs to non-key columns or incompatible types, tables without columns, clashing names after schema flattening, and PostgreSQL index-name clashes. |
 
-If anything fails you see the problems (also listed in the **DB Designer** output channel) and can fix them or **Save Anyway**. **Export SQL → Validate SQL (all dialects)** runs the checks for all four targets without saving.
+If anything fails you see the problems (also listed in the **DB Designer** output channel) and can fix them or **Save Anyway**. **Export SQL → Validate SQL (all dialects)** runs the checks for every target without saving.
 
-**Full schema**: choose **PostgreSQL**, **SQL Server**, **MySQL / MariaDB** or **SQLite**. If schemas are hidden in the filter, only the visible ones are exported.
+**Full schema**: choose **PostgreSQL**, **SQL Server** (2016–2022), **SQL Server 2025**, **MySQL / MariaDB** or **SQLite**. If schemas are hidden in the filter, only the visible ones are exported.
 
 Every column type is first normalised to PostgreSQL (so a diagram loaded from SQL Server or MySQL works too), then mapped to the closest type in the target. Anything that can't be represented exactly is converted to the nearest safe form and listed under **Conversion notes** at the end of the file.
 
-| PostgreSQL | SQL Server | MySQL 8 | SQLite |
+| PostgreSQL | SQL Server | MySQL / MariaDB | SQLite |
 |---|---|---|---|
 | `uuid` | `uniqueidentifier` | `char(36)` | `TEXT` |
 | `text` | `nvarchar(max)` (`nvarchar(450)` in keys) | `text` (`varchar(255)` in keys) | `TEXT` |
@@ -106,10 +112,11 @@ Every column type is first normalised to PostgreSQL (so a diagram loaded from SQ
 | `numeric(p,s)` | `decimal(p,s)` (unbounded → `decimal(38,10)`) | `decimal(p,s)` (unbounded → `decimal(65,30)`) | `NUMERIC(p,s)` |
 | `boolean` | `bit` | `boolean` (= `tinyint(1)`) | `INTEGER` + `CHECK (x IN (0,1))` |
 | `timestamp` / `timestamptz` | `datetime2` / `datetimeoffset` | `datetime(6)` (store UTC) | `DATETIME` (ISO-8601 text) |
-| `json` / `jsonb` | `nvarchar(max)` + `ISJSON` check | `json` | `TEXT` + `json_valid` check |
+| `json` / `jsonb` | `nvarchar(max)` + `ISJSON` check; **2025: `json`** | `json` | `TEXT` + `json_valid` check |
+| `vector(n)` (pgvector) | JSON array in `nvarchar(max)`; **2025: `vector(n)`** (up to 1998 dims) | `json` array | `TEXT` JSON array |
 | `bytea` | `varbinary(max)` | `longblob` | `BLOB` |
 | enum type | `nvarchar` + `CHECK (… IN …)` | `enum(…)` | `TEXT` + `CHECK (… IN …)` |
-| arrays | JSON text | `json` | JSON text |
+| arrays | JSON text; **2025: `json`** | `json` | JSON text |
 | `interval`, `inet`, `tsvector` | text equivalents (noted) | text equivalents (noted) | `TEXT` |
 
 Defaults are converted too:
@@ -117,7 +124,7 @@ Defaults are converted too:
 | PostgreSQL | SQL Server | MySQL | SQLite |
 |---|---|---|---|
 | `now()` | `SYSDATETIMEOFFSET()` / `SYSDATETIME()` | `CURRENT_TIMESTAMP(6)` | `CURRENT_TIMESTAMP` |
-| `gen_random_uuid()` | `NEWID()` | `(UUID())` | a v4 UUID expression |
+| `gen_random_uuid()`, `uuidv7()`, `uuidv4()` | `NEWID()` | `(UUID())` | a v4 UUID expression |
 | `true` | `1` | `1` | `1` |
 
 The exporter also handles each engine's rules:
@@ -183,6 +190,20 @@ A tolerant DDL parser replays the scripts:
 
 Functions, triggers, views, DML and grants are ignored. Warnings go to the **DB Designer** output channel and the ⚠ toolbar button.
 
+## Supported engine versions
+
+Every export target is run on real engines in CI on each push. Each run creates the schema, introspects it back, compares it with the diagram, and checks defaults, cascades and constraints with real rows:
+
+| Engine | Oldest tested | Latest tested |
+|---|---|---|
+| PostgreSQL | 16 | 18 (with pgvector): `uuidv7()`, `VIRTUAL` generated columns, `vector(n)` |
+| SQL Server | 2022 (**SQL Server** target) | 2025 (**SQL Server 2025** target: native `json`, `vector(n)`) |
+| MySQL | 8.4 | 9 |
+| MariaDB | n/a | latest (13.0) |
+| SQLite | bundled 3.x (sql.js) | |
+
+Live connections read these versions too: SQL Server 2025 `json` and `vector(n)` columns, PostgreSQL 18 virtual generated columns, and MariaDB's integer display widths (`int(11)` is shown as `int`). PostgreSQL types appear with their usual short names (`timestamptz`, `varchar(n)`).
+
 ## Releases
 
 `.github/workflows/build.yml` runs typecheck, tests and an activation smoke test on Linux, Windows and macOS for every push and PR, and packages the VSIX. Pushing to the default branch, or pushing a `vX.Y.Z` tag that matches `package.json`'s version, publishes a GitHub Release `vX.Y.Z` with the `.vsix` attached and generated notes. To release, bump `version` in `package.json`, add a `CHANGELOG.md` entry, and push. Install a release with **Extensions → … → Install from VSIX…**.
@@ -200,7 +221,7 @@ npm run package      # → db-designer-vs-<version>.vsix
 Press **F5** in VS Code to launch an Extension Development Host.
 
 - `test/integration.ts` checks the parser and exporter against a real PostgreSQL. It compares parser output with introspection, re-applies a full export, and applies a generated migration. See the header of the file for usage.
-- `test/dialect-integration.ts` runs every exported dialect on real engines: PostgreSQL, SQL Server and MySQL in Docker, and SQLite in-process. It creates the schema, introspects it back, and compares it with the model (tables, columns, nullability, keys, FKs, defaults, declared types, FK actions). It then inserts and deletes rows to check that defaults, cascades and enum/CHECK constraints behave the same. See the header of the file for the connection settings.
+- `test/dialect-integration.ts` runs every exported dialect on real engines: PostgreSQL, SQL Server and MySQL/MariaDB in Docker, and SQLite in-process. Set `MSSQL2025_URL` to also run the SQL Server 2025 target, and `ENGINES=postgres,mysql` to run only some engines. A **latest-features** input covers `uuidv7()`, virtual generated columns, `vector` and `json`; it runs on PostgreSQL only when the server is 18+ with pgvector. It creates the schema, introspects it back, and compares it with the model (tables, columns, nullability, keys, FKs, defaults, declared types, FK actions). It then inserts and deletes rows to check that defaults, cascades and enum/CHECK constraints behave the same. See the header of the file for the connection settings.
 - `test/harness/index.html` runs the webview in a normal browser with a stubbed VS Code API. Generate its data with `node dist-test/make-data.js <sql-folder>` after bundling `test/harness/make-data.ts`.
 
 ## License

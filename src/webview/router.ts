@@ -242,3 +242,41 @@ export function crosses(points: Pt[], r: Rect): boolean {
   }
   return false;
 }
+
+/**
+ * A user-shaped line: leaves the source side, passes through each bend point with orthogonal (L-shaped)
+ * segments, and enters the target side horizontally.
+ */
+export function orthogonalThrough(s: Pt, sSide: Side, points: Pt[], t: Pt, tSide: Side, stub = 26): Pt[] {
+  const s1 = { x: s.x + (sSide === 'R' ? stub : -stub), y: s.y };
+  const t1 = { x: t.x + (tSide === 'R' ? stub : -stub), y: t.y };
+  const out: Pt[] = [s, s1];
+  let cur = s1;
+  points.forEach((p, i) => {
+    // Normally across, then up/down onto the bend point. Leaving a table, never double back across it.
+    const back = i === 0 && (sSide === 'R' ? p.x < s1.x : p.x > s1.x);
+    out.push(back ? { x: cur.x, y: p.y } : { x: p.x, y: cur.y }, p);
+    cur = p;
+  });
+  // Normally up/down, then across into the table; but never approach it through the table itself.
+  const through = points.length > 0 && (tSide === 'R' ? cur.x < t1.x : cur.x > t1.x);
+  out.push(through ? { x: t1.x, y: cur.y } : { x: cur.x, y: t1.y }, t1, t);
+  return simplify(out);
+}
+
+/** Snap a point to a grid so hand-placed bends line up. */
+export function snap(p: Pt, grid = 10): Pt {
+  return { x: Math.round(p.x / grid) * grid, y: Math.round(p.y / grid) * grid };
+}
+
+/**
+ * Waypoints that reproduce an orthogonal line (from routeOrthogonal or orthogonalThrough) when fed back
+ * into orthogonalThrough. The first and last corners sit on the table rows and are left out, so the line
+ * keeps attaching to its columns when tables move.
+ */
+export function toWaypoints(full: Pt[]): Pt[] {
+  const c = simplify(full).slice(1, -1);
+  if (c.length >= 3) return c.slice(1, -1);
+  if (c.length === 2) return [{ x: c[0].x, y: (c[0].y + c[1].y) / 2 }];
+  return [];
+}

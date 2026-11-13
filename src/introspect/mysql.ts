@@ -70,7 +70,7 @@ export async function introspectMysql(connection: string): Promise<Introspection
         schema: '',
         table: r.tbl,
         column: r.col,
-        type: String(r.type),
+        type: stripDisplayWidth(String(r.type)),
         nullable: r.nullable === 'YES',
         default:
           r.def === null || r.def === undefined || (mariadb && /^NULL$/i.test(String(r.def)))
@@ -89,4 +89,10 @@ export async function introspectMysql(connection: string): Promise<Introspection
   } finally {
     await conn.end().catch(() => undefined);
   }
+}
+
+/** MariaDB (and MySQL before 8.0.19) report integer display widths like int(11); they don't change the type. */
+export function stripDisplayWidth(t: string): string {
+  if (/^tinyint\(1\)/i.test(t)) return t; // boolean
+  return t.replace(/^(tinyint|smallint|mediumint|int|integer|bigint)\(\d+\)/i, '$1');
 }

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Rect, crosses, roundedPath, routeOrthogonal } from '../src/webview/router';
+import { Rect, crosses, orthogonalThrough, roundedPath, routeOrthogonal, simplify, snap, toWaypoints } from '../src/webview/router';
 import { autoLayout, nodeHeight, NODE_WIDTH } from '../src/webview/layout';
 import { edgeSidesFor } from '../src/webview/edgeGeometry';
 import { parseSql } from '../src/shared/sqlParser';
@@ -58,4 +58,41 @@ test('real schema: no routed line passes under a table', { skip: !fs.existsSync(
   const ms = Date.now() - t0;
   assert.ok(routed >= schema.relations.length * 0.95, `routed ${routed}/${schema.relations.length} (fallback ${fallback})`);
   assert.ok(ms < 8000, `routing all ${schema.relations.length} relations took ${ms} ms`);
+});
+
+test('manual routes: waypoints from a route reproduce it, and follow moved tables', () => {
+  const s = { x: 0, y: 100 };
+  const t = { x: 400, y: 300 };
+  const obstacles = [{ x1: 120, y1: 40, x2: 280, y2: 360 }];
+  const auto = routeOrthogonal(s, 'R', t, 'L', obstacles)!;
+  assert.ok(auto.length >= 4);
+  const w = toWaypoints(auto);
+  assert.deepEqual(orthogonalThrough(s, 'R', w, t, 'L'), simplify(auto));
+  // Tables moved: the line still starts and ends horizontally on the column rows.
+  const s2 = { x: -40, y: 140 };
+  const t2 = { x: 460, y: 260 };
+  const moved = orthogonalThrough(s2, 'R', w, t2, 'L');
+  assert.deepEqual(moved[0], s2);
+  assert.deepEqual(moved[moved.length - 1], t2);
+  assert.equal(moved[1].y, s2.y);
+  assert.equal(moved[moved.length - 2].y, t2.y);
+  for (let k = 1; k < moved.length; k++) assert.ok(moved[k].x === moved[k - 1].x || moved[k].y === moved[k - 1].y, 'orthogonal');
+  // Z-shaped line (two corners) keeps its vertical position as one waypoint.
+  const z = [s, { x: 200, y: 100 }, { x: 200, y: 300 }, t];
+  assert.deepEqual(toWaypoints(z), [{ x: 200, y: 200 }]);
+  assert.deepEqual(orthogonalThrough(s, 'R', toWaypoints(z), t, 'L'), z);
+  assert.deepEqual(snap({ x: 14, y: 26 }), { x: 10, y: 30 });
+});
+
+test('manual routes never approach a table through itself', () => {
+  // FK end on the right side of a table whose left edge is at x=600; the bend is to the left of it.
+  const s = { x: 100, y: 250 };
+  const t = { x: 805, y: 340 };
+  const pts = orthogonalThrough(s, 'R', [{ x: 650, y: 180 }], t, 'R');
+  const table = { x1: 600, y1: 290, x2: 800, y2: 420 };
+  assert.ok(!crosses(pts, table), JSON.stringify(pts));
+  // Bend behind the source table: leave it vertically first rather than crossing back over it.
+  const back = orthogonalThrough({ x: 205, y: 300 }, 'R', [{ x: 100, y: 150 }], { x: 600, y: 300 }, 'L');
+  assert.equal(back[2].x, back[1].x, 'leaves the stub vertically: ' + JSON.stringify(back));
+  assert.ok(back[1].x > 205);
 });

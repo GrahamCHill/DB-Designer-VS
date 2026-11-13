@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { DiagramGroup, ErdFile, HostToWebview, Layout, Schema, WebviewToHost } from './shared/model';
+import { DiagramGroup, EdgeRoute, ErdFile, HostToWebview, Layout, Schema, WebviewToHost } from './shared/model';
 import { generateDiffSql } from './shared/pgExport';
 import { EXPORT_DIALECTS, ExportDialect, generateSchemaSql } from './shared/sqlExport';
 import { Verification, VerifyInput, validationHeader, verifyExport } from './verify/index';
@@ -13,6 +13,7 @@ import { buildStandaloneHtml } from './standalone';
 interface SavedState {
   layout: Layout;
   groups?: DiagramGroup[];
+  edges?: Record<string, EdgeRoute>;
   working?: Schema;
   dirty?: boolean;
 }
@@ -149,7 +150,7 @@ export class ErdPanel {
     void addRecent(this.context, this.source, this.loaded.title).then(() => ErdPanel.changed.fire());
     if (discardDraft) {
       const s = this.savedState();
-      await this.saveState({ layout: s?.layout ?? {}, groups: s?.groups });
+      await this.saveState({ layout: s?.layout ?? {}, groups: s?.groups, edges: s?.edges });
       this.dirty = false;
     }
     this.post();
@@ -180,6 +181,7 @@ export class ErdPanel {
       canSaveFile: this.source.kind === 'erd',
       hiddenSchemas: this.loaded.hiddenSchemas,
       groups: saved?.groups ?? this.loaded.groups,
+      edges: saved?.edges ?? this.loaded.edges,
       aiProvider: providerLabel(currentProvider()),
     });
   }
@@ -277,7 +279,7 @@ export class ErdPanel {
         this.dirty = m.dirty;
         this.working = m.working;
         this.layout = m.layout;
-        await this.saveState({ layout: m.layout, working: m.dirty ? m.working : undefined, dirty: m.dirty, groups: m.groups });
+        await this.saveState({ layout: m.layout, working: m.dirty ? m.working : undefined, dirty: m.dirty, groups: m.groups, edges: m.edges });
         return;
       case 'reload': {
         if (this.dirty) {
@@ -295,7 +297,7 @@ export class ErdPanel {
         const ok = await vscode.window.showWarningMessage('Discard all edits made in the diagram?', { modal: true }, 'Discard');
         if (ok !== 'Discard') return;
         const s = this.savedState();
-        await this.saveState({ layout: s?.layout ?? {}, groups: s?.groups });
+        await this.saveState({ layout: s?.layout ?? {}, groups: s?.groups, edges: s?.edges });
         this.dirty = false;
         this.post();
         return;
@@ -474,7 +476,7 @@ export class ErdPanel {
     this.savingFile = true;
     try {
       await fs.writeFile(this.source.path, JSON.stringify(file, null, 2), 'utf8');
-      await this.saveState({ layout: file.layout, groups: file.groups });
+      await this.saveState({ layout: file.layout, groups: file.groups, edges: file.edges });
       this.dirty = false;
       await this.load(false);
       this.send({ type: 'saved' });

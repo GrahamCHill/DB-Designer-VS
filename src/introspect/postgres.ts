@@ -9,6 +9,7 @@ SELECT n.nspname AS schema, c.relname AS table, a.attname AS column,
        NOT a.attnotnull AS nullable,
        pg_get_expr(d.adbin, d.adrelid) AS default,
        (a.attidentity <> '') AS identity,
+       a.attgenerated AS generated,
        col_description(c.oid, a.attnum) AS comment
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
@@ -79,9 +80,12 @@ export async function introspectPostgres(connectionString: string): Promise<Intr
         schema: r.schema,
         table: r.table,
         column: r.column,
-        type: r.type,
+        type: shortPgType(r.type),
         nullable: r.nullable,
-        default: r.default,
+        default:
+          r.generated === 's' || r.generated === 'v'
+            ? `GENERATED ALWAYS AS (${r.default}) ${r.generated === 'v' ? 'VIRTUAL' : 'STORED'}`
+            : r.default,
         identity: r.identity,
         comment: r.comment,
       })),
@@ -102,4 +106,17 @@ export async function introspectPostgres(connectionString: string): Promise<Intr
   } finally {
     await client.end().catch(() => undefined);
   }
+}
+
+/** format_type() spells types out in full; show the short names people write. */
+export function shortPgType(t: string): string {
+  return t
+    .replace(/^timestamp(\(\d+\))? with time zone/, 'timestamptz$1')
+    .replace(/^timestamp(\(\d+\))? without time zone/, 'timestamp$1')
+    .replace(/^time(\(\d+\))? with time zone/, 'timetz$1')
+    .replace(/^time(\(\d+\))? without time zone/, 'time$1')
+    .replace(/^character varying/, 'varchar')
+    .replace(/^character(?=\(|$|\[)/, 'char')
+    .replace(/^bit varying/, 'varbit')
+    .replace(/^double precision/, 'float8');
 }

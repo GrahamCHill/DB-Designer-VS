@@ -63,8 +63,15 @@ export async function verifyPostgres(sql: string, assetsDir: string, setup?: str
         return { ok: false, engine, error: `the starting schema could not be created: ${(e as Error).message}` };
       }
     }
+    // PGlite is PostgreSQL 17: stand in for PostgreSQL 18's uuidv7()/uuidv4() and VIRTUAL generated columns.
+    if (/\buuidv[47]\s*\(/i.test(all))
+      await db.exec(
+        "CREATE OR REPLACE FUNCTION public.uuidv7() RETURNS uuid LANGUAGE sql AS 'SELECT gen_random_uuid()';" +
+          "CREATE OR REPLACE FUNCTION public.uuidv4() RETURNS uuid LANGUAGE sql AS 'SELECT gen_random_uuid()';",
+      );
     // Statement by statement, so a failure can name the exact statement.
-    for (const stmt of splitStatements(sql)) {
+    for (const raw of splitStatements(sql)) {
+      const stmt = pg18Compat(raw);
       try {
         await db.exec(stmt);
       } catch (e) {
@@ -115,5 +122,18 @@ export function splitStatements(sql: string): string[] {
     i++;
   }
   if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+/** PostgreSQL 18 syntax PGlite (17) doesn't parse yet, rewritten to its closest 17 form for validation only. */
+export function pg18Compat(stmt: string): string {
+  return stmt.replace(/(GENERATED\s+ALWAYS\s+AS\s*\((?:[^()]|\([^()]*\))*\))\s*VIRTUAL\b/gi, '$1 STORED');
+}
+
+/** PostgreSQL 18 features the SQL uses that PGlite only emulates (for the validation summary). */
+export function pg18Features(sql: string): string[] {
+  const out: string[] = [];
+  if (/\buuidv[47]\s*\(/i.test(sql)) out.push('uuidv7()/uuidv4()');
+  if (/GENERATED\s+ALWAYS\s+AS\s*\((?:[^()]|\([^()]*\))*\)\s*VIRTUAL\b/i.test(sql)) out.push('virtual generated columns');
   return out;
 }

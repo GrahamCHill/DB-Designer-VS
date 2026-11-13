@@ -1200,3 +1200,49 @@ textarea:focus {
 .standalone .erd-group-edit {
   display: none;
 }
+
+/* ---------- hand-shaped lines ---------- */
+.erd-edge-grip {
+  position: absolute;
+  pointer-events: all;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--card);
+  border: 2px solid var(--edge-active);
+  box-shadow: var(--shadow);
+  z-index: 999;
+  touch-action: none;
+}
+.erd-edge-grip.seg-h {
+  width: 18px;
+  height: 8px;
+  cursor: ns-resize;
+}
+.erd-edge-grip.seg-v {
+  width: 8px;
+  height: 18px;
+  cursor: ew-resize;
+}
+.erd-edge-grip.bend {
+  border-radius: 50%;
+  background: var(--edge-active);
+  cursor: move;
+}
+.erd-edge-grip.add {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border-style: dashed;
+  cursor: copy;
+  opacity: 0.8;
+}
+.erd-edge-grip:hover {
+  transform-origin: center;
+  outline: 3px solid color-mix(in srgb, var(--edge-active) 30%, transparent);
+}
+.btn.mini {
+  padding: 1px 6px;
+  font-size: 10.5px;
+  line-height: 16px;
+}

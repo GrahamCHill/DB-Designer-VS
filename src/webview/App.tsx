@@ -16,6 +16,7 @@ import {
 import {
   Column,
   DiagramGroup,
+  EdgeRoute,
   ErdFile,
   HostToWebview,
   Layout,
@@ -88,9 +89,17 @@ interface Meta {
   canSaveFile: boolean;
 }
 
+/** Everything undo/redo restores: the schema and the diagram's arrangement. */
+interface Snapshot {
+  schema: Schema;
+  pos: Record<string, Position>;
+  groups: DiagramGroup[];
+  routes: Record<string, EdgeRoute>;
+}
+
 interface History {
-  past: Schema[];
-  future: Schema[];
+  past: Snapshot[];
+  future: Snapshot[];
   lastKey?: string;
   lastTime: number;
 }
@@ -159,6 +168,12 @@ export function App() {
     groupsRef.current = g;
     setGroupsState(g);
   }, []);
+  const [routes, setRoutesState] = useState<Record<string, EdgeRoute>>({});
+  const routesRef = useRef<Record<string, EdgeRoute>>({});
+  const setRoutes = useCallback((r: Record<string, EdgeRoute>) => {
+    routesRef.current = r;
+    setRoutesState(r);
+  }, []);
   const [dragging, setDragging] = useState<Set<string>>(new Set());
   const [routing, setRouting] = useState<boolean>(() => {
     try {
@@ -219,72 +234,99 @@ export function App() {
   const scheduleSave = useCallback(() => {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      post({ type: 'saveState', layout: currentLayout(), working: schemaRef.current, dirty: dirtyRef.current, groups: groupsRef.current });
+      post({ type: 'saveState', layout: currentLayout(), working: schemaRef.current, dirty: dirtyRef.current, groups: groupsRef.current, edges: routesRef.current });
     }, 400);
   }, [currentLayout]);
 
   // ---- mutations with undo/redo ----------------------------------------
 
-  const mutate: Mutate = useCallback(
-    (fn, key) => {
-      const prev = schemaRef.current;
+  const snapshot = useCallback(
+    (): Snapshot => ({ schema: schemaRef.current, pos: { ...posRef.current }, groups: groupsRef.current, routes: routesRef.current }),
+    [],
+  );
+
+  /**
+   * Record the current state before a change, so it can be undone. Changes with the same `key` within
+   * 1.5 s (e.g. typing in one field) merge into a single undo step.
+   */
+  const record = useCallback(
+    (key?: string) => {
       const h = history.current;
       const now = Date.now();
       if (!(key && key === h.lastKey && now - h.lastTime < 1500)) {
-        h.past.push(prev);
+        h.past.push(snapshot());
         if (h.past.length > 200) h.past.shift();
       }
       h.lastKey = key;
       h.lastTime = now;
       h.future = [];
-      const next = cloneSchema(prev);
+      setHistoryTick((x) => x + 1);
+    },
+    [snapshot],
+  );
+
+  const mutate: Mutate = useCallback(
+    (fn, key) => {
+      record(key);
+      const next = cloneSchema(schemaRef.current);
       fn(next);
       setSchema(next);
+      scheduleSave();
+    },
+    [record, setSchema, scheduleSave],
+  );
+
+  const restore = useCallback(
+    (snap: Snapshot) => {
+      setSchema(snap.schema);
+      posRef.current = { ...snap.pos };
+      setGroups(snap.groups);
+      setRoutes(snap.routes);
+      setNodes((nds) => nds.map((n) => (n.type === 'table' && snap.pos[n.id] && snap.pos[n.id] !== n.position ? { ...n, position: snap.pos[n.id] } : n)));
       setHistoryTick((x) => x + 1);
       scheduleSave();
     },
-    [setSchema, scheduleSave],
+    [setSchema, setGroups, setRoutes, scheduleSave],
   );
 
   const undo = useCallback(() => {
     const h = history.current;
     const prev = h.past.pop();
     if (!prev) return;
-    h.future.push(schemaRef.current);
+    h.future.push(snapshot());
     h.lastKey = undefined;
-    setSchema(prev);
-    setHistoryTick((x) => x + 1);
-    scheduleSave();
-  }, [setSchema, scheduleSave]);
+    restore(prev);
+  }, [snapshot, restore]);
 
   const redo = useCallback(() => {
     const h = history.current;
     const next = h.future.pop();
     if (!next) return;
-    h.past.push(schemaRef.current);
+    h.past.push(snapshot());
     h.lastKey = undefined;
-    setSchema(next);
-    setHistoryTick((x) => x + 1);
-    scheduleSave();
-  }, [setSchema, scheduleSave]);
+    restore(next);
+  }, [snapshot, restore]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')) return;
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+      const key = e.key.toLowerCase();
+      if (mod && !e.altKey && (key === 'z' || e.code === 'KeyZ') && !e.shiftKey) {
         e.preventDefault();
+        e.stopPropagation();
         undo();
-      } else if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+      } else if (mod && !e.altKey && (key === 'y' || e.code === 'KeyY' || ((key === 'z' || e.code === 'KeyZ') && e.shiftKey))) {
         e.preventDefault();
+        e.stopPropagation();
         redo();
       } else if (e.key === 'Escape') {
         setMenu(undefined);
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [undo, redo]);
 
   // ---- messages from the extension host ----------------------------------
@@ -317,6 +359,7 @@ export function App() {
         else if (known < m.working.tables.length) Object.assign(pos, placeMissing(m.working.tables, pos));
         posRef.current = pos;
         setGroups(m.groups ?? []);
+        setRoutes(m.edges ?? {});
         if (firstLoad.current) {
           const schemas = new Set(m.working.tables.map((t) => t.schema));
           const hide = m.hiddenSchemas ?? (m.readOnlySource && m.mode !== 'standalone' ? [...schemas].filter((s) => INTERNAL_SCHEMAS.has(s)) : []);
@@ -551,13 +594,15 @@ export function App() {
       const highlighted = highlight.edges.has(r.id);
       r.fromColumns.forEach((fc, i) => {
         const tc = r.toColumns[i];
+        const edgeId = i === 0 ? r.id : `${r.id}::${i}`;
+        const manual = routes[edgeId];
         out.push({
-          id: i === 0 ? r.id : `${r.id}::${i}`,
+          id: edgeId,
           type: 'relation',
           source: r.toTable,
           target: r.fromTable,
-          sourceHandle: `${tc}::${sSide}`,
-          targetHandle: `${fc}::${tSide}`,
+          sourceHandle: `${tc}::${manual?.s ?? sSide}`,
+          targetHandle: `${fc}::${manual?.t ?? tSide}`,
           selected: selectedEdges.has(r.id),
           zIndex: highlighted ? 5 : 0,
           data: {
@@ -569,12 +614,14 @@ export function App() {
             highlighted,
             dimmed: highlight.dimOthers && !highlighted,
             moving: groupMoving || dragging.has(r.toTable) || dragging.has(r.fromTable),
+            route: manual,
+            editable,
           },
         });
       });
     }
     return out;
-  }, [nodes, schema.relations, tableById, highlight, selectedEdges, hoverEdge, dragging]);
+  }, [nodes, schema.relations, tableById, highlight, selectedEdges, hoverEdge, dragging, routes, editable]);
 
   // ---- React Flow handlers -------------------------------------------------
 
@@ -648,15 +695,18 @@ export function App() {
   const groupActions: GroupActions = useMemo(
     () => ({
       update: (id, patch) => {
+        record(`group:${id}:${Object.keys(patch).join(',')}`);
         setGroups(groupsRef.current.map((g) => (g.id === id ? { ...g, ...patch } : g)));
         scheduleSave();
       },
       remove: (id) => {
+        record();
         const gone = groupsRef.current.find((g) => g.id === id);
         setGroups(groupsRef.current.filter((g) => g.id !== id).map((g) => (g.parentId === id ? { ...g, parentId: gone?.parentId } : g)));
         scheduleSave();
       },
       resized: (id, rect) => {
+        record();
         let gs = groupsRef.current.map((g) => (g.id === id ? { ...g, ...rect } : g));
         // Re-evaluate which tables belong to the resized group.
         for (const n of nodesRef.current) {
@@ -671,7 +721,7 @@ export function App() {
         scheduleSave();
       },
     }),
-    [setGroups, scheduleSave],
+    [setGroups, scheduleSave, record],
   );
 
   const addGroup = useCallback(() => {
@@ -714,10 +764,11 @@ export function App() {
     const group: DiagramGroup = { id, name: sel.length ? `Group ${gs.length + 1}` : 'New group', color, ...rect, tables };
     const next = gs.map((g) => ({ ...g, tables: g.tables.filter((k) => !tables.includes(k)) }));
     group.parentId = parentFor(group, next);
+    record();
     setGroups([...next, group]);
     scheduleSave();
     setToast(sel.length ? `Grouped ${sel.length} table${sel.length === 1 ? '' : 's'}. Use Edit on the group header to rename or recolour it` : 'Empty group added: drag tables into it, or select tables first and then add a group');
-  }, [rf, setGroups, scheduleSave]);
+  }, [rf, setGroups, scheduleSave, record]);
 
   const removeRelations = useCallback(
     (ids: Set<string>) => {
@@ -725,9 +776,11 @@ export function App() {
       mutate((s) => {
         s.relations = s.relations.filter((r) => !ids.has(r.id));
       });
+      const keep = Object.fromEntries(Object.entries(routesRef.current).filter(([k]) => !ids.has(relIdOf(k))));
+      if (Object.keys(keep).length !== Object.keys(routesRef.current).length) setRoutes(keep);
       setSelectedEdges((prev) => new Set([...prev].filter((x) => !ids.has(x))));
     },
-    [mutate],
+    [mutate, setRoutes],
   );
 
   const onEdgesChange = useCallback(
@@ -791,6 +844,7 @@ export function App() {
 
   const nodeActions: NodeActions = useMemo(
     () => ({
+      relate: (tableId) => setRelDraft({ childTable: tableId }),
       edit: (tableId, columnId) => {
         setAiOpen(false);
         setEditor({ tableId, columnId, nonce: Date.now() });
@@ -806,7 +860,20 @@ export function App() {
     [mutate],
   );
 
-  const edgeActions = useMemo(() => ({ remove: (id: string) => removeRelations(new Set([relIdOf(id)])) }), [removeRelations]);
+  const edgeActions = useMemo(
+    () => ({
+      remove: (id: string) => removeRelations(new Set([relIdOf(id)])),
+      beginEdit: () => record(),
+      setRoute: (id: string, route: EdgeRoute | undefined) => {
+        const next = { ...routesRef.current };
+        if (route && (route.s || route.t || route.points?.length)) next[id] = route;
+        else delete next[id];
+        setRoutes(next);
+        scheduleSave();
+      },
+    }),
+    [removeRelations, record, setRoutes, scheduleSave],
+  );
 
   const addTable = useCallback(() => {
     const s = schemaRef.current;
@@ -874,6 +941,7 @@ export function App() {
   }, [mutate, rf, hiddenSchemas]);
 
   const runAutoLayout = useCallback(() => {
+    record();
     const gs = groupsRef.current;
     let pos: Record<string, Position>;
     let newGroups = gs;
@@ -923,7 +991,7 @@ export function App() {
     scheduleSave();
     const b = boundsOf(visibleTables, posRef.current, newGroups);
     setTimeout(() => (b ? rf.fitBounds(b, { padding: 0.05, duration: 300 }) : rf.fitView({ padding: 0.08, maxZoom: 1, duration: 300 })), 50);
-  }, [visibleTables, rf, scheduleSave, setGroups]);
+  }, [visibleTables, rf, scheduleSave, setGroups, record]);
 
   const matches = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -967,6 +1035,7 @@ export function App() {
           palette: imageTheme === 'light' ? LIGHT : DARK,
           title: meta?.title,
           routing,
+          routes: routesRef.current,
           groups: groupsRef.current.map(
             (g): GroupBox => ({ x: g.x, y: g.y, w: g.w, h: g.h, name: g.name, color: g.color, depth: groupDepth(g.id, groupsRef.current) }),
           ),
@@ -996,6 +1065,7 @@ export function App() {
     layout: currentLayout(),
     hiddenSchemas: hiddenSchemas.size ? [...hiddenSchemas] : undefined,
     groups: groupsRef.current.length ? groupsRef.current : undefined,
+    edges: Object.keys(routesRef.current).length ? routesRef.current : undefined,
   });
 
   const share = (kind: 'erd' | 'html') => {
@@ -1110,13 +1180,6 @@ export function App() {
                 <>
                   <button className="btn" onClick={addTable} title="Add a new table">
                     + Table
-                  </button>
-                  <button
-                    className="btn"
-                    onClick={() => setRelDraft(selectedTable ? { childTable: selectedTable } : {})}
-                    title="Create a primary key → foreign key relationship (or drag between column dots)"
-                  >
-                    + Relation
                   </button>
                   <button className="btn" onClick={addGroup} title="Group the selected tables (Ctrl/Shift-click or drag a box to select several), or add an empty group">
                     + Group
@@ -1277,9 +1340,11 @@ export function App() {
                             {d.id === 'postgres'
                               ? 'Same types as the diagram'
                               : d.id === 'mssql'
-                                ? 'Closest SQL Server types · cascade paths & key sizes handled'
+                                ? 'SQL Server 2016–2022 · cascade paths & key sizes handled'
+                                : d.id === 'mssql2025'
+                                  ? 'Native json and vector(n) types'
                                 : d.id === 'mysql'
-                                  ? 'Closest MySQL 8 types · one database, InnoDB'
+                                  ? 'MySQL 8.0+ / 9 & MariaDB · one database, InnoDB'
                                   : 'SQLite types · foreign keys inline'}
                           </span>
                         </button>
@@ -1308,7 +1373,10 @@ export function App() {
                 nodesConnectable={editable}
                 isValidConnection={isValidConnection}
                 connectionMode={ConnectionMode.Loose}
-                onNodeDragStart={(_, __, dragged) => setDragging(new Set(dragged.map((n) => n.id)))}
+                onNodeDragStart={(_, __, dragged) => {
+                  if (editable) record();
+                  setDragging(new Set(dragged.map((n) => n.id)));
+                }}
                 onNodeDragStop={(_, __, dragged) => {
                   setDragging(new Set());
                   if (!editable) return;

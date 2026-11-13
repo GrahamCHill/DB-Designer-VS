@@ -71,6 +71,15 @@ export interface Position {
   y: number;
 }
 
+/** Manual control of a relationship line: attachment sides and bend points (flow coordinates). */
+export interface EdgeRoute {
+  /** Side of the referenced (PK) table the line leaves from. */
+  s?: 'L' | 'R';
+  /** Side of the referencing (FK) table the line enters. */
+  t?: 'L' | 'R';
+  points?: Position[];
+}
+
 /** A coloured area that owns tables (and nested groups); dragging it moves them together. */
 export interface DiagramGroup {
   id: string;
@@ -129,6 +138,8 @@ export interface ErdFile {
   layout: Layout;
   hiddenSchemas?: string[];
   groups?: DiagramGroup[];
+  /** Manual line routes keyed by edge id. */
+  edges?: Record<string, EdgeRoute>;
 }
 
 export function isErdFile(x: unknown): x is ErdFile {
@@ -155,6 +166,7 @@ export type HostToWebview =
       canSaveFile?: boolean;
       hiddenSchemas?: string[];
       groups?: DiagramGroup[];
+      edges?: Record<string, EdgeRoute>;
       aiProvider?: string;
     }
   | { type: 'exported'; path: string; note?: string }
@@ -177,7 +189,7 @@ export type WebviewToHost =
       /** Target dialect for full-schema export (migrations are PostgreSQL). */
       target?: import('./sqlExport').ExportDialect;
     }
-  | { type: 'saveState'; layout: Layout; working: Schema; dirty: boolean; groups?: DiagramGroup[] }
+  | { type: 'saveState'; layout: Layout; working: Schema; dirty: boolean; groups?: DiagramGroup[]; edges?: Record<string, EdgeRoute> }
   | { type: 'reload' }
   | { type: 'discard' }
   | { type: 'info'; message: string }

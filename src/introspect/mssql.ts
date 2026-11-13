@@ -60,6 +60,9 @@ function formatType(r: { type_name: string; max_length: number; precision: numbe
     case 'decimal':
     case 'numeric':
       return `${n}(${r.precision},${r.scale})`;
+    case 'vector':
+      // 8-byte header + 4 bytes per float32 dimension
+      return r.max_length > 8 ? `vector(${(r.max_length - 8) / 4})` : 'vector';
     case 'datetime2':
     case 'datetimeoffset':
     case 'time':

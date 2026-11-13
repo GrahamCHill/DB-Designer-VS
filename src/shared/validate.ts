@@ -2,7 +2,7 @@
 // different) in the target engine. Errors block a clean export; warnings are informational.
 
 import { Schema, Table } from './model';
-import { ExportDialect, canonicalType, PgKind } from './sqlExport';
+import { ExportDialect, canonicalType, engineOf, PgKind } from './sqlExport';
 import { pgSchemaName } from './pgExport';
 import { parseSql } from './sqlParser';
 
@@ -12,8 +12,14 @@ export interface Issue {
   message: string;
 }
 
-const NAME_LIMIT: Record<ExportDialect, number> = { postgres: 63, mssql: 128, mysql: 64, sqlite: Infinity };
-const DIALECT_LABEL: Record<ExportDialect, string> = { postgres: 'PostgreSQL', mssql: 'SQL Server', mysql: 'MySQL', sqlite: 'SQLite' };
+const NAME_LIMIT: Record<ExportDialect, number> = { postgres: 63, mssql: 128, mssql2025: 128, mysql: 64, sqlite: Infinity };
+const DIALECT_LABEL: Record<ExportDialect, string> = {
+  postgres: 'PostgreSQL',
+  mssql: 'SQL Server',
+  mssql2025: 'SQL Server 2025',
+  mysql: 'MySQL',
+  sqlite: 'SQLite',
+};
 
 /** Type families that may reference each other in a foreign key. */
 function family(k: PgKind): string {
@@ -27,7 +33,7 @@ function family(k: PgKind): string {
 
 /** Final table name in the target (MySQL/SQLite flatten schemas, prefixing only on clashes). */
 export function targetTableName(t: Table, all: Table[], target: ExportDialect, schema: Schema): string {
-  if (target === 'postgres' || target === 'mssql') return `${pgSchemaName(t.schema, schema.dialect)}.${t.name}`;
+  if (target === 'postgres' || engineOf(target) === 'mssql') return `${pgSchemaName(t.schema, schema.dialect)}.${t.name}`;
   const clash = all.filter((x) => x.name.toLowerCase() === t.name.toLowerCase()).length > 1;
   const s = pgSchemaName(t.schema, schema.dialect);
   return clash && s !== 'public' ? `${s}_${t.name}` : t.name;
@@ -153,7 +159,7 @@ export function structuralCheck(model: Schema, sql: string, target: ExportDialec
       continue;
     }
     if (ch === "'" || ch === '"' || ch === '`') quote = ch;
-    else if (ch === '[' && target === 'mssql') quote = ']';
+    else if (ch === '[' && engineOf(target) === 'mssql') quote = ']';
     else if (ch === '(') depth++;
     else if (ch === ')') depth--;
     if (depth < 0) {
@@ -166,12 +172,12 @@ export function structuralCheck(model: Schema, sql: string, target: ExportDialec
 
   const include = schemas ? new Set(schemas) : undefined;
   const tables = model.tables.filter((t) => !include || include.has(t.schema));
-  const parsed = parseSql([{ name: 'export.sql', content: sql }], { dialect: target }).schema;
+  const parsed = parseSql([{ name: 'export.sql', content: sql }], { dialect: engineOf(target) }).schema;
   const norm = (s: string) => s.toLowerCase();
   const pt = new Map(parsed.tables.map((t) => [norm(target === 'mysql' || target === 'sqlite' ? t.name : `${t.schema}.${t.name}`), t]));
   for (const t of tables) {
     const name = targetTableName(t, tables, target, model);
-    const key = norm(target === 'mssql' ? name.replace(/^public\./i, 'dbo.') : name);
+    const key = norm(engineOf(target) === 'mssql' ? name.replace(/^public\./i, 'dbo.') : name);
     const p = pt.get(key);
     if (!p) {
       problems.push(`Table ${name} is missing from the generated SQL.`);

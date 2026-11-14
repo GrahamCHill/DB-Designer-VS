@@ -1437,6 +1437,7 @@ export function App() {
                 onApply={applySuggestion}
                 onShowTables={showTables}
                 onChooseProvider={() => post({ type: 'aiChooseProvider' })}
+                onChooseModel={() => post({ type: 'aiChooseModel' })}
                 onExportMigration={() => doExport('diff')}
                 onClose={() => setAiOpen(false)}
               />

@@ -78,6 +78,11 @@
         "category": "DB Designer"
       },
       {
+        "command": "dbDesigner.aiChooseModel",
+        "title": "AI: Choose Model…",
+        "category": "DB Designer"
+      },
+      {
         "command": "dbDesigner.refreshSidebar",
         "title": "Refresh",
         "category": "DB Designer",
@@ -270,7 +275,7 @@
         "dbDesigner.ai.vscodeModel": {
           "type": "string",
           "default": "",
-          "description": "Model family for the VS Code provider (e.g. \"gpt-4o\", \"claude-sonnet-4\"). Empty = ask the first time."
+          "description": "Model ID or family for the VS Code provider. Empty = choose from available models on first use."
         },
         "dbDesigner.ai.anthropicModel": {
           "type": "string",
@@ -295,7 +300,7 @@
         "dbDesigner.ai.openaiModel": {
           "type": "string",
           "default": "",
-          "description": "Model for the OpenAI-compatible provider. Empty = the endpoint preset default (Groq: llama-3.3-70b-versatile)."
+          "description": "Model ID for the OpenAI-compatible provider. Empty = choose from models available at the configured endpoint."
         }
       }
     },

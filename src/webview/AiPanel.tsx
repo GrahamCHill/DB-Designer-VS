@@ -21,6 +21,7 @@ interface Props {
   onApply(s: AiSuggestion): void;
   onShowTables(names: string[]): void;
   onChooseProvider(): void;
+  onChooseModel(): void;
   onExportMigration(): void;
   onClose(): void;
 }
@@ -45,10 +46,12 @@ export function AiPanel(p: Props) {
       </header>
       <div className="erd-editor-body">
         <div className="ai-provider">
-          <span className="muted small">Model provider</span>
           <span className="grow">{p.provider || '…'}</span>
           <button className="btn" onClick={p.onChooseProvider}>
-            Change
+            Provider…
+          </button>
+          <button className="btn" onClick={p.onChooseModel}>
+            Model…
           </button>
         </div>
         <label className="field">

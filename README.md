@@ -28,7 +28,7 @@ Everything is also available from the Command Palette:
 | **Remove Saved Connection…** | |
 | **New Blank ERD** | Start from an empty PostgreSQL diagram. |
 | **Open Shared Diagram (.erd.json)…** | Open a diagram someone shared, or double-click any `*.erd.json` file. |
-| **AI: Review Normalisation of Open Diagram** | Opens the AI review panel. Related commands: **AI: Choose Provider…**, **AI: Set API Key (stored encrypted)…**, **AI: Remove Saved API Keys…**. |
+| **AI: Review Normalisation of Open Diagram** | Opens the AI review panel. Related commands: **AI: Choose Provider…**, **AI: Choose Model…**, **AI: Set API Key (stored encrypted)…**, **AI: Remove Saved API Keys…**. |
 
 Connection string examples:
 
@@ -157,16 +157,16 @@ The exporter also handles each engine's rules:
 
 **AI review** asks a language model to check the diagram for 1NF/2NF/3NF/BCNF problems: repeating groups, list-in-a-column, partial and transitive dependencies, duplicated facts, missing FKs and keys, and types like dates or money stored as text. Each suggestion comes with a severity, an explanation, and concrete steps. **Apply to diagram** performs the steps as one undoable edit, and **Export migration** turns everything you applied into SQL. You can review the whole visible diagram or just the selected table and its neighbours, and add a focus ("look at the approvals tables").
 
-Only the schema structure is sent (tables, columns, types, keys), never row data. Choose the provider with **DB Designer: AI: Choose Provider…** or the **Change** button:
+Only the schema structure is sent (tables, columns, types, keys), never row data. Use **Provider…** in the review panel or **DB Designer: AI: Choose Provider…** to set up a provider. Use **Model…** or **DB Designer: AI: Choose Model…** to refresh the active provider's model list and save a selection for future reviews.
 
 | Provider (`dbDesigner.ai.provider`) | Needs | Notes |
 |---|---|---|
-| `vscode` (default) | GitHub Copilot or another VS Code chat-model provider | No key. Model family via `dbDesigner.ai.vscodeModel`; you are asked on first use. |
-| `anthropic` | An Anthropic API key (**AI: Set API Key…**; `ANTHROPIC_API_KEY` also works) | Default model `claude-opus-5-5` (`dbDesigner.ai.anthropicModel`). Uses structured JSON output and server-side refusal fallbacks. |
-| `openai` | **Groq** (default), OpenAI, OpenRouter, LM Studio, or any OpenAI-compatible URL (`dbDesigner.ai.openaiBaseUrl`) plus its API key (**AI: Set API Key…**; `GROQ_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` also work) | Choosing it walks you through endpoint, key and model, and lists the endpoint's models. Default Groq model: `llama-3.3-70b-versatile` (`dbDesigner.ai.openaiModel`). Requests JSON-schema output where the server supports it. |
-| `ollama` | A running [Ollama](https://ollama.com) (`dbDesigner.ai.ollamaUrl`) | Fully local. Pick a model on first use (`dbDesigner.ai.ollamaModel`). Small models work but are slow and less reliable. `qwen3.5:4b` gave a correct review of a test schema in about 5 minutes on CPU. |
+| `vscode` (default) | GitHub Copilot or another VS Code chat-model provider | Lists available VS Code chat models and saves the ID in `dbDesigner.ai.vscodeModel`. |
+| `anthropic` | An Anthropic API key (**AI: Set API Key…** or `ANTHROPIC_API_KEY`) | Lists models from the Anthropic API and saves the ID in `dbDesigner.ai.anthropicModel`. Uses structured JSON output and server-side refusal fallbacks where supported. |
+| `openai` | **Groq** (default), OpenAI, OpenRouter, LM Studio, or an OpenAI-compatible URL (`dbDesigner.ai.openaiBaseUrl`). For hosted APIs, use **AI: Set API Key…** or the provider's environment variable (`GROQ_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`). | Queries the endpoint's `/models` API and saves the ID in `dbDesigner.ai.openaiModel`. If discovery fails, the warning offers manual ID entry. Requests JSON-schema output where the server supports it. |
+| `ollama` | A running [Ollama](https://ollama.com) (`dbDesigner.ai.ollamaUrl`) | Lists installed Ollama models and saves the name in `dbDesigner.ai.ollamaModel`. Small models work but are slow and less reliable. `qwen3.5:4b` gave a correct review of a test schema in about 5 minutes on CPU. |
 
-**API keys are stored encrypted**, in VS Code Secret Storage, which uses your operating system's keychain (Windows Credential Manager/DPAPI, macOS Keychain, libsecret on Linux). They are never written to settings files, and there is one key per endpoint.
+**API keys entered in DB Designer are encrypted by VS Code Secret Storage.** OpenAI-compatible keys are stored per server origin. Settings store the provider, endpoint URL and model ID.
 
 ### Agent tools (Copilot agent mode and other VS Code agents)
 

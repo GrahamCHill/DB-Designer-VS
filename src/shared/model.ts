@@ -201,4 +201,5 @@ export type WebviewToHost =
   | { type: 'aiCancel' }
   | { type: 'validate'; schema: Schema; schemas?: string[] }
   | { type: 'aiChooseProvider' }
+  | { type: 'aiChooseModel' }
   | { type: 'opsApplied'; requestId: string; errors: string[] };

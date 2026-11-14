@@ -10,20 +10,46 @@ const FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-fab
 
 /** Ready-made OpenAI-compatible endpoints. */
 export const OPENAI_PRESETS = [
-  { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', env: 'GROQ_API_KEY', keyUrl: 'console.groq.com/keys' },
-  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', env: 'OPENAI_API_KEY', keyUrl: 'platform.openai.com/api-keys' },
-  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'meta-llama/llama-3.3-70b-instruct', env: 'OPENROUTER_API_KEY', keyUrl: 'openrouter.ai/keys' },
-  { id: 'lmstudio', label: 'LM Studio (local)', baseUrl: 'http://localhost:1234/v1', model: '', env: '', keyUrl: '' },
+  { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', env: 'GROQ_API_KEY', keyUrl: 'console.groq.com/keys' },
+  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', env: 'OPENAI_API_KEY', keyUrl: 'platform.openai.com/api-keys' },
+  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', env: 'OPENROUTER_API_KEY', keyUrl: 'openrouter.ai/keys' },
+  { id: 'lmstudio', label: 'LM Studio (local)', baseUrl: 'http://localhost:1234/v1', env: '', keyUrl: '' },
 ] as const;
 
 function cfg() {
   return vscode.workspace.getConfiguration('dbDesigner.ai');
 }
 
+const PROVIDER_LABELS: Record<AiProvider, string> = {
+  vscode: 'VS Code language model (e.g. Copilot)',
+  anthropic: 'Anthropic Claude API',
+  openai: 'Groq / OpenAI-compatible API',
+  ollama: 'Ollama (local)',
+};
+
+function settingsTarget(...keys: string[]): vscode.ConfigurationTarget {
+  const settings = cfg();
+  return keys.some((key) => settings.inspect(key)?.workspaceValue !== undefined)
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+}
+
+function openAiBaseUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value.trim());
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return undefined;
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function openaiEndpoint(): { baseUrl: string; model: string; label: string } {
-  const baseUrl = (cfg().get<string>('openaiBaseUrl') || OPENAI_PRESETS[0].baseUrl).replace(/\/+$/, '');
+  const configured = cfg().get<string>('openaiBaseUrl') || OPENAI_PRESETS[0].baseUrl;
+  const baseUrl = openAiBaseUrl(configured);
+  if (!baseUrl) return { baseUrl: configured, model: '', label: 'OpenAI-compatible API' };
   const preset = OPENAI_PRESETS.find((x) => x.baseUrl === baseUrl);
-  return { baseUrl, model: cfg().get<string>('openaiModel')?.trim() || preset?.model || '', label: preset?.label ?? new URL(baseUrl).host };
+  return { baseUrl, model: cfg().get<string>('openaiModel')?.trim() || '', label: preset?.label ?? new URL(baseUrl).host };
 }
 
 /** Secret Storage key for an endpoint's API key (one per host). */
@@ -31,21 +57,27 @@ function keyName(baseUrl: string): string {
   return `dbDesigner.apiKey:${new URL(baseUrl).origin}`;
 }
 
+function isLocalEndpoint(baseUrl: string): boolean {
+  return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(baseUrl).hostname);
+}
+
 export function providerLabel(p: AiProvider): string {
   if (p === 'openai') {
     const e = openaiEndpoint();
     return `${e.label} (OpenAI-compatible)${e.model ? ` · ${e.model}` : ''}`;
   }
-  return { vscode: 'VS Code language model (e.g. Copilot)', anthropic: 'Anthropic Claude API', ollama: 'Ollama (local)' }[p];
+  const label = PROVIDER_LABELS[p];
+  const model = cfg().get<string>(`${p}Model`)?.trim();
+  return model ? `${label} · ${model}` : label;
 }
 
 export function currentProvider(): AiProvider {
   return (cfg().get<string>('provider') as AiProvider) || 'vscode';
 }
 
-export async function chooseProvider(secrets?: vscode.SecretStorage): Promise<AiProvider | undefined> {
+export async function chooseProvider(secrets: vscode.SecretStorage): Promise<AiProvider | undefined> {
   const items = (['vscode', 'anthropic', 'openai', 'ollama'] as AiProvider[]).map((p) => ({
-    label: p === 'openai' ? 'Groq / OpenAI-compatible API' : providerLabel(p),
+    label: PROVIDER_LABELS[p],
     description: p === currentProvider() ? 'current' : undefined,
     detail: {
       vscode: 'Uses a chat model already available in VS Code (GitHub Copilot or another installed provider). No API key needed.',
@@ -57,62 +89,215 @@ export async function chooseProvider(secrets?: vscode.SecretStorage): Promise<Ai
   }));
   const pick = await vscode.window.showQuickPick(items, { title: 'AI provider for normalisation reviews' });
   if (!pick) return undefined;
-  if (pick.p === 'openai' && !(await configureOpenAi(secrets))) return undefined;
-  await cfg().update('provider', pick.p, vscode.ConfigurationTarget.Global);
+  if (!(await (pick.p === 'openai' ? configureOpenAi(secrets) : chooseModel(secrets, pick.p)))) return undefined;
+  await cfg().update('provider', pick.p, settingsTarget('provider'));
   return pick.p;
 }
 
-/** Pick an OpenAI-compatible endpoint and model, and make sure there is a key for it. */
-async function configureOpenAi(secrets?: vscode.SecretStorage): Promise<boolean> {
+export async function chooseModel(secrets: vscode.SecretStorage, provider = currentProvider()): Promise<string | undefined> {
+  const setting = `${provider}Model`;
+  const current = cfg().get<string>(setting)?.trim();
+  let model: string | undefined;
+  if (provider === 'openai') {
+    const endpoint = openaiEndpoint();
+    if (!openAiBaseUrl(endpoint.baseUrl)) return configureOpenAi(secrets);
+    model = await pickOpenAiModel(secrets, endpoint.baseUrl, endpoint.model);
+  } else if (provider === 'anthropic') {
+    model = await pickAnthropicModel(secrets, current);
+  } else if (provider === 'ollama') {
+    let models: ModelChoice[];
+    try {
+      const baseUrl = ollamaUrl();
+      models = await loadModels('Ollama', (signal) => listOllamaModels(baseUrl, signal));
+    } catch (e) {
+      void vscode.window.showErrorMessage((e as Error).message);
+      return undefined;
+    }
+    model = (await modelPicker('Ollama', models, current))?.model.id;
+  } else {
+    model = (await pickVscodeModel(await vscode.lm.selectChatModels(), current))?.id;
+  }
+  if (model) {
+    const keys = provider === 'openai' ? [setting, 'openaiBaseUrl'] : provider === 'ollama' ? [setting, 'ollamaUrl'] : [setting];
+    await cfg().update(setting, model, settingsTarget(...keys));
+  }
+  return model;
+}
+
+async function configureOpenAi(secrets: vscode.SecretStorage): Promise<string | undefined> {
   const current = openaiEndpoint();
   const presetPick = await vscode.window.showQuickPick(
     [
-      ...OPENAI_PRESETS.map((x) => ({ label: x.label, description: x.baseUrl, detail: x.model ? `Default model: ${x.model}` : 'Uses the model loaded in LM Studio', preset: x as (typeof OPENAI_PRESETS)[number] | undefined })),
-      { label: 'Custom endpoint…', description: 'Any OpenAI-compatible /v1 URL', detail: undefined, preset: undefined },
+      ...OPENAI_PRESETS.map((x) => ({ label: x.label, description: x.baseUrl, baseUrl: x.baseUrl as string | undefined })),
+      { label: 'Custom endpoint…', description: 'Any OpenAI-compatible /v1 URL', baseUrl: undefined },
     ],
     { title: 'OpenAI-compatible endpoint', placeHolder: `Current: ${current.baseUrl}` },
   );
-  if (!presetPick) return false;
-  let baseUrl: string | undefined = presetPick.preset?.baseUrl;
+  if (!presetPick) return undefined;
+  let baseUrl = presetPick.baseUrl;
   if (!baseUrl) {
-    baseUrl = await vscode.window.showInputBox({
+    const input = await vscode.window.showInputBox({
       title: 'OpenAI-compatible base URL',
       value: current.baseUrl,
       prompt: 'The URL that ends before /chat/completions, e.g. https://api.together.xyz/v1',
       ignoreFocusOut: true,
-      validateInput: (v) => (/^https?:\/\/\S+$/.test(v.trim()) ? undefined : 'Enter an http(s) URL'),
+      validateInput: (v) => openAiBaseUrl(v) ? undefined : 'Enter an HTTP or HTTPS URL without credentials, a query string or a fragment.',
     });
-    if (!baseUrl) return false;
+    baseUrl = input && openAiBaseUrl(input);
+    if (!baseUrl) return undefined;
   }
-  baseUrl = baseUrl.trim().replace(/\/+$/, '');
-  const needsKey = !/^http:\/\/(localhost|127\.0\.0\.1)/.test(baseUrl);
-  if (needsKey && secrets && !(await secrets.get(keyName(baseUrl))) && !envKey(baseUrl)) {
-    if (!(await setApiKeyFor(secrets, baseUrl, presetPick.preset?.label ?? new URL(baseUrl).host, presetPick.preset?.keyUrl))) return false;
+  const model = await pickOpenAiModel(secrets, baseUrl, baseUrl === current.baseUrl ? current.model : undefined);
+  if (model) {
+    const target = settingsTarget('openaiBaseUrl', 'openaiModel');
+    await cfg().update('openaiBaseUrl', baseUrl, target);
+    await cfg().update('openaiModel', model, target);
   }
-  // Model: offer the endpoint's model list when it can be fetched.
-  let models: string[] = [];
+  return model;
+}
+
+interface ModelChoice {
+  id: string;
+  name?: string;
+  detail?: string;
+}
+
+function modelPicker<T extends ModelChoice>(label: string, models: T[], current?: string) {
+  const items = models.map((model) => ({
+    label: model.name || model.id,
+    description: [model.name && model.id, model.id === current && 'current'].filter(Boolean).join(' · '),
+    detail: model.detail,
+    model,
+  }));
+  return vscode.window.showQuickPick(items, {
+    title: `${label} model`,
+    placeHolder: 'Choose the model to save for normalisation reviews',
+    matchOnDescription: true,
+  });
+}
+
+function loadModels<T>(label: string, load: (signal: AbortSignal) => Promise<T>): Thenable<T> {
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `DB Designer: Loading ${label} models…` },
+    () => load(AbortSignal.timeout(15000)),
+  );
+}
+
+async function listOpenAiModels(baseUrl: string, label: string, key?: string) {
   try {
-    const key = secrets ? await getOpenAiKey(secrets, baseUrl) : undefined;
-    const res = await fetch(`${baseUrl}/models`, { headers: key ? { authorization: `Bearer ${key}` } : {} });
-    if (res.ok) models = (((await res.json()) as { data?: { id: string }[] }).data ?? []).map((m) => m.id).sort();
+    return await loadModels(label, async (signal) => {
+      const response = await fetch(`${baseUrl}/models`, { headers: key ? { authorization: `Bearer ${key}` } : {}, signal });
+      if (!response.ok) return { status: response.status, models: [] };
+      const body = (await response.json()) as { data?: { id?: string; active?: boolean }[] } | null;
+      const ids = Array.isArray(body?.data) ? body.data.flatMap((model) =>
+        model?.active !== false && typeof model?.id === 'string' && model.id.trim() ? [model.id] : [],
+      ) : [];
+      return { status: response.status, models: [...new Set(ids)].sort() };
+    });
   } catch {
-    /* model list is optional */
+    return undefined;
   }
-  const preferred = presetPick.preset?.model || cfg().get<string>('openaiModel') || '';
-  let model: string | undefined;
-  if (models.length) {
-    const mp = await vscode.window.showQuickPick(
-      models.map((m) => ({ label: m, description: m === preferred ? 'recommended' : undefined })).sort((a, b) => (b.description ? 1 : 0) - (a.description ? 1 : 0)),
-      { title: 'Model', placeHolder: 'Choose the model to use for reviews' },
-    );
-    model = mp?.label;
-  } else {
-    model = await vscode.window.showInputBox({ title: 'Model name', value: preferred, ignoreFocusOut: true, validateInput: (v) => (v.trim() ? undefined : 'Required') });
+}
+
+async function pickOpenAiModel(secrets: vscode.SecretStorage, baseUrl: string, current?: string): Promise<string | undefined> {
+  const preset = OPENAI_PRESETS.find((x) => x.baseUrl === baseUrl);
+  const label = preset?.label ?? new URL(baseUrl).host;
+  let key = await getOpenAiKey(secrets, baseUrl);
+  if (!key && !isLocalEndpoint(baseUrl)) {
+    key = await setApiKeyFor(secrets, baseUrl, label, preset?.keyUrl);
+    if (!key) return undefined;
   }
-  if (!model) return false;
-  await cfg().update('openaiBaseUrl', baseUrl, vscode.ConfigurationTarget.Global);
-  await cfg().update('openaiModel', model.trim(), vscode.ConfigurationTarget.Global);
-  return true;
+  let result = await listOpenAiModels(baseUrl, label, key);
+  if (result?.status === 401 || result?.status === 403) {
+    const action = await vscode.window.showWarningMessage(`${label} refused access to the model list (HTTP ${result.status}).`, 'Set API Key');
+    if (action !== 'Set API Key') return undefined;
+    key = await setApiKeyFor(secrets, baseUrl, label, preset?.keyUrl);
+    if (!key) return undefined;
+    result = await listOpenAiModels(baseUrl, label, key);
+    if (result?.status === 401 || result?.status === 403) {
+      void vscode.window.showErrorMessage(`${label} still refuses access to the model list (HTTP ${result.status}). Check the API key and its permissions.`);
+      return undefined;
+    }
+  }
+  if (result?.models.length) {
+    const items = result.models.map((id) => ({ id }));
+    return (await modelPicker(label, items, current))?.model.id;
+  }
+  let problem = `Could not load models from ${label}. Check the endpoint and try again.`;
+  if (result) {
+    problem = result.status < 300 ? `${label} returned no available models.` : `${label} could not list models (HTTP ${result.status}).`;
+  }
+  const manual = await vscode.window.showWarningMessage(problem, 'Enter Model ID');
+  if (manual !== 'Enter Model ID') return undefined;
+  const input = await vscode.window.showInputBox({
+    title: `${label} model ID`,
+    prompt: 'Enter the model ID to save for normalisation reviews',
+    value: current,
+    ignoreFocusOut: true,
+    validateInput: (value) => value.trim() ? undefined : 'Enter a model ID.',
+  });
+  return input?.trim();
+}
+
+async function getAnthropicKey(secrets: vscode.SecretStorage): Promise<string | undefined> {
+  return (await secrets.get(ANTHROPIC_KEY)) || process.env.ANTHROPIC_API_KEY;
+}
+
+async function pickAnthropicModel(secrets: vscode.SecretStorage, current?: string): Promise<string | undefined> {
+  let apiKey = await getAnthropicKey(secrets);
+  if (!apiKey) {
+    apiKey = await setAnthropicKey(secrets);
+    if (!apiKey) return undefined;
+  }
+  let models: ModelChoice[];
+  try {
+    const client = new Anthropic({ apiKey, maxRetries: 0 });
+    models = await loadModels('Anthropic', async (signal) => {
+      const choices: ModelChoice[] = [];
+      for await (const model of client.models.list({}, { signal })) {
+        const capabilities = model.capabilities;
+        if (capabilities?.structured_outputs?.supported === false || capabilities?.effort?.high?.supported === false) continue;
+        choices.push({ id: model.id, name: model.display_name });
+      }
+      return choices;
+    });
+  } catch (e) {
+    const warning = e instanceof Anthropic.AuthenticationError || e instanceof Anthropic.PermissionDeniedError
+      ? 'Anthropic refused access to the model list. Run “DB Designer: AI: Set API Key” to update the key.'
+      : 'Could not load Anthropic models. Check your connection and try again.';
+    void vscode.window.showErrorMessage(warning);
+    return undefined;
+  }
+  if (models.length) return (await modelPicker('Anthropic', models, current))?.model.id;
+  void vscode.window.showWarningMessage('Anthropic returned no models compatible with normalisation reviews.');
+}
+
+async function pickVscodeModel(models: vscode.LanguageModelChat[], current?: string): Promise<vscode.LanguageModelChat | undefined> {
+  if (!models.length) {
+    void vscode.window.showWarningMessage('No VS Code chat models are available. Sign in to GitHub Copilot or install a language model provider.');
+    return undefined;
+  }
+  const selected = models.find((m) => m.id === current) ?? models.find((m) => m.family === current);
+  const choices = models.map((chat) => ({ id: chat.id, name: chat.name, detail: `${chat.vendor} · ${chat.family}`, chat }));
+  return (await modelPicker('VS Code', choices, selected?.id))?.model.chat;
+}
+
+function ollamaUrl(): string {
+  return (cfg().get<string>('ollamaUrl') || 'http://localhost:11434').replace(/\/+$/, '');
+}
+
+async function listOllamaModels(baseUrl: string, signal: AbortSignal): Promise<ModelChoice[]> {
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/api/tags`, { signal });
+  } catch (e) {
+    if (signal.aborted) throw signal.reason;
+    throw new Error('Could not connect to Ollama. Check the configured URL and whether the server is running.', { cause: e });
+  }
+  if (!response.ok) throw new Error(`Ollama could not list models (HTTP ${response.status}).`);
+  const tags = (await response.json()) as { models?: { name: string }[] };
+  const models = tags.models ?? [];
+  if (!models.length) throw new Error(`No models found in Ollama at ${baseUrl}. Pull one first, e.g. "ollama pull qwen2.5-coder".`);
+  return models.map(({ name }) => ({ id: name }));
 }
 
 function envKey(baseUrl: string): string | undefined {
@@ -124,7 +309,7 @@ async function getOpenAiKey(secrets: vscode.SecretStorage, baseUrl: string): Pro
   return (await secrets.get(keyName(baseUrl))) || envKey(baseUrl);
 }
 
-async function setApiKeyFor(secrets: vscode.SecretStorage, baseUrl: string, label: string, keyUrl?: string): Promise<boolean> {
+async function setApiKeyFor(secrets: vscode.SecretStorage, baseUrl: string, label: string, keyUrl?: string): Promise<string | undefined> {
   const key = await vscode.window.showInputBox({
     title: `${label} API key`,
     prompt: `Stored encrypted in VS Code Secret Storage (your OS keychain), never in settings.${keyUrl ? ` Get a key at ${keyUrl}.` : ''}`,
@@ -132,10 +317,11 @@ async function setApiKeyFor(secrets: vscode.SecretStorage, baseUrl: string, labe
     ignoreFocusOut: true,
     validateInput: (v) => (v.trim().length >= 8 ? undefined : 'That does not look like an API key'),
   });
-  if (!key) return false;
-  await secrets.store(keyName(baseUrl), key.trim());
+  if (!key) return undefined;
+  const apiKey = key.trim();
+  await secrets.store(keyName(baseUrl), apiKey);
   vscode.window.showInformationMessage(`${label} API key saved (encrypted).`);
-  return true;
+  return apiKey;
 }
 
 /** "AI: Set API Key…": Anthropic or the configured OpenAI-compatible endpoint. */
@@ -144,14 +330,14 @@ export async function setApiKey(secrets: vscode.SecretStorage): Promise<boolean>
   const pick = await vscode.window.showQuickPick(
     [
       { label: 'Anthropic', description: 'console.anthropic.com', id: 'anthropic' },
-      { label: `${e.label}`, description: e.baseUrl, id: 'openai' },
+      ...(openAiBaseUrl(e.baseUrl) ? [{ label: e.label, description: e.baseUrl, id: 'openai' }] : []),
     ],
     { title: 'Which API key do you want to save (encrypted)?' },
   );
   if (!pick) return false;
-  if (pick.id === 'anthropic') return setAnthropicKey(secrets);
+  if (pick.id === 'anthropic') return !!(await setAnthropicKey(secrets));
   const preset = OPENAI_PRESETS.find((x) => x.baseUrl === e.baseUrl);
-  return setApiKeyFor(secrets, e.baseUrl, e.label, preset?.keyUrl);
+  return !!(await setApiKeyFor(secrets, e.baseUrl, e.label, preset?.keyUrl));
 }
 
 export async function clearApiKeys(secrets: vscode.SecretStorage) {
@@ -159,7 +345,7 @@ export async function clearApiKeys(secrets: vscode.SecretStorage) {
   const pick = await vscode.window.showQuickPick(
     [
       { label: 'Anthropic', id: 'anthropic' },
-      { label: e.label, description: e.baseUrl, id: 'openai' },
+      ...(openAiBaseUrl(e.baseUrl) ? [{ label: e.label, description: e.baseUrl, id: 'openai' }] : []),
     ],
     { title: 'Remove which saved API key?', canPickMany: true },
   );
@@ -168,7 +354,7 @@ export async function clearApiKeys(secrets: vscode.SecretStorage) {
   vscode.window.showInformationMessage(`Removed ${pick.length} API key(s).`);
 }
 
-export async function setAnthropicKey(secrets: vscode.SecretStorage): Promise<boolean> {
+async function setAnthropicKey(secrets: vscode.SecretStorage): Promise<string | undefined> {
   const key = await vscode.window.showInputBox({
     title: 'Anthropic API key',
     prompt: 'Stored encrypted in VS Code Secret Storage (your OS keychain). Create one at console.anthropic.com.',
@@ -176,10 +362,11 @@ export async function setAnthropicKey(secrets: vscode.SecretStorage): Promise<bo
     ignoreFocusOut: true,
     validateInput: (v) => (v.trim().startsWith('sk-ant-') ? undefined : 'Expected a key starting with sk-ant-'),
   });
-  if (!key) return false;
-  await secrets.store(ANTHROPIC_KEY, key.trim());
+  if (!key) return undefined;
+  const apiKey = key.trim();
+  await secrets.store(ANTHROPIC_KEY, apiKey);
   vscode.window.showInformationMessage('Anthropic API key saved (encrypted).');
-  return true;
+  return apiKey;
 }
 
 export async function clearAnthropicKey(secrets: vscode.SecretStorage) {
@@ -191,14 +378,13 @@ export async function clearAnthropicKey(secrets: vscode.SecretStorage) {
 async function runOpenAi(user: string, secrets: vscode.SecretStorage, token: vscode.CancellationToken): Promise<{ text: string; model: string }> {
   let { baseUrl, model, label } = openaiEndpoint();
   if (!model) {
-    if (!(await configureOpenAi(secrets))) throw new vscode.CancellationError();
+    if (!(await chooseModel(secrets, 'openai'))) throw new vscode.CancellationError();
     ({ baseUrl, model, label } = openaiEndpoint());
   }
   let key = await getOpenAiKey(secrets, baseUrl);
-  const local = /^http:\/\/(localhost|127\.0\.0\.1)/.test(baseUrl);
-  if (!key && !local) {
-    if (!(await setApiKeyFor(secrets, baseUrl, label))) throw new vscode.CancellationError();
-    key = await getOpenAiKey(secrets, baseUrl);
+  if (!key && !isLocalEndpoint(baseUrl)) {
+    key = await setApiKeyFor(secrets, baseUrl, label);
+    if (!key) throw new vscode.CancellationError();
   }
   const abort = new AbortController();
   const sub = token.onCancellationRequested(() => abort.abort());
@@ -252,22 +438,20 @@ async function runOpenAi(user: string, secrets: vscode.SecretStorage, token: vsc
 
 async function runVscodeLm(user: string, token: vscode.CancellationToken): Promise<{ text: string; model: string }> {
   const wanted = cfg().get<string>('vscodeModel')?.trim();
-  let models = await vscode.lm.selectChatModels(wanted ? { family: wanted } : undefined);
-  if (!models.length && wanted) models = await vscode.lm.selectChatModels({ id: wanted });
-  if (!models.length && wanted) models = await vscode.lm.selectChatModels();
+  let models = wanted ? await vscode.lm.selectChatModels({ id: wanted }) : [];
+  if (!models.length && wanted) models = await vscode.lm.selectChatModels({ family: wanted });
+  const foundSavedModel = models.length > 0;
+  if (!foundSavedModel) models = await vscode.lm.selectChatModels();
   if (!models.length)
     throw new Error(
       'No VS Code language model is available. Sign in to GitHub Copilot (or install another model provider), or switch the DB Designer AI provider to Anthropic or Ollama.',
     );
   let model = models[0];
-  if (!wanted && models.length > 1) {
-    const pick = await vscode.window.showQuickPick(
-      models.map((m) => ({ label: m.name, description: `${m.vendor} · ${m.family}`, m })),
-      { title: 'Choose a language model for the normalisation review' },
-    );
+  if (!foundSavedModel) {
+    const pick = models.length === 1 && !wanted ? model : await pickVscodeModel(models, wanted);
     if (!pick) throw new vscode.CancellationError();
-    model = pick.m;
-    await cfg().update('vscodeModel', model.family, vscode.ConfigurationTarget.Global);
+    model = pick;
+    await cfg().update('vscodeModel', model.id, settingsTarget('vscodeModel'));
   }
   // The VS Code LM API has no system role: send the instructions as the first user message.
   const resp = await model.sendRequest(
@@ -285,10 +469,10 @@ async function runAnthropic(
   secrets: vscode.SecretStorage,
   token: vscode.CancellationToken,
 ): Promise<{ text: string; model: string }> {
-  let apiKey = (await secrets.get(ANTHROPIC_KEY)) || process.env.ANTHROPIC_API_KEY;
+  let apiKey = await getAnthropicKey(secrets);
   if (!apiKey) {
-    if (!(await setAnthropicKey(secrets))) throw new vscode.CancellationError();
-    apiKey = await secrets.get(ANTHROPIC_KEY);
+    apiKey = await setAnthropicKey(secrets);
+    if (!apiKey) throw new vscode.CancellationError();
   }
   const model = cfg().get<string>('anthropicModel')?.trim() || 'claude-opus-5-5';
   const client = new Anthropic({ apiKey });
@@ -313,7 +497,7 @@ async function runAnthropic(
     const text = msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
     return { text, model: msg.model };
   } catch (e) {
-    if (e instanceof Anthropic.AuthenticationError) throw new Error('Anthropic rejected the API key. Run "DB Designer: Set Anthropic API Key".');
+    if (e instanceof Anthropic.AuthenticationError) throw new Error('Anthropic rejected the API key. Run "DB Designer: AI: Set API Key…".');
     if (e instanceof Anthropic.RateLimitError) throw new Error('Anthropic rate limit reached. Try again in a moment.');
     if (e instanceof Anthropic.NotFoundError) throw new Error(`Model "${model}" was not found. Check the dbDesigner.ai.anthropicModel setting.`);
     if (e instanceof Anthropic.APIUserAbortError) throw new vscode.CancellationError();
@@ -325,19 +509,16 @@ async function runAnthropic(
 }
 
 async function runOllama(user: string, token: vscode.CancellationToken): Promise<{ text: string; model: string }> {
-  const base = (cfg().get<string>('ollamaUrl') || 'http://localhost:11434').replace(/\/+$/, '');
+  const base = ollamaUrl();
   let model = cfg().get<string>('ollamaModel')?.trim();
   const abort = new AbortController();
   const sub = token.onCancellationRequested(() => abort.abort());
   try {
     if (!model) {
-      const tags = (await (await fetch(`${base}/api/tags`, { signal: abort.signal })).json()) as { models?: { name: string }[] };
-      const names = (tags.models ?? []).map((m) => m.name);
-      if (!names.length) throw new Error(`No models found in Ollama at ${base}. Pull one first, e.g. "ollama pull qwen2.5-coder".`);
-      const pick = await vscode.window.showQuickPick(names, { title: 'Choose an Ollama model for the normalisation review' });
-      if (!pick) throw new vscode.CancellationError();
-      model = pick;
-      await cfg().update('ollamaModel', model, vscode.ConfigurationTarget.Global);
+      const models = await listOllamaModels(base, abort.signal);
+      model = (await modelPicker('Ollama', models))?.model.id;
+      if (!model) throw new vscode.CancellationError();
+      await cfg().update('ollamaModel', model, settingsTarget('ollamaUrl', 'ollamaModel'));
     }
     const res = await fetch(`${base}/api/chat`, {
       method: 'POST',

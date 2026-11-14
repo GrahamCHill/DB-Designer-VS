@@ -48,6 +48,7 @@ const configs = args.has('--tests')
           'test/validate.test.ts',
           'test/router.test.ts',
           'test/groups.test.ts',
+          'test/ai-providers.test.ts',
         ],
         outdir: 'dist-test',
       },

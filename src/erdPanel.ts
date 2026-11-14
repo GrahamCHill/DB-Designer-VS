@@ -7,7 +7,7 @@ import { EXPORT_DIALECTS, ExportDialect, generateSchemaSql } from './shared/sqlE
 import { Verification, VerifyInput, validationHeader, verifyExport } from './verify/index';
 import { SchemaOp } from './shared/ops';
 import { LoadedSource, Source, addRecent, loadSource, sourceKey, sourceTitle } from './sources';
-import { chooseProvider, currentProvider, providerLabel, runReview } from './ai/providers';
+import { currentProvider, providerLabel, runReview } from './ai/providers';
 import { buildStandaloneHtml } from './standalone';
 
 interface SavedState {
@@ -94,6 +94,11 @@ export class ErdPanel {
     panel.onDidDispose(() => this.dispose(), null, this.disposables);
     panel.onDidChangeViewState((e) => e.webviewPanel.active && (ErdPanel.lastActive = this), null, this.disposables);
     panel.webview.onDidReceiveMessage((m: WebviewToHost) => this.onMessage(m), null, this.disposables);
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (this.ready && event.affectsConfiguration('dbDesigner.ai')) {
+        this.send({ type: 'aiProvider', label: providerLabel(currentProvider()) });
+      }
+    }, null, this.disposables);
     const saved = this.savedState();
     this.dirty = !!saved?.dirty;
     void this.load(false);
@@ -317,11 +322,10 @@ export class ErdPanel {
       case 'aiCancel':
         this.aiCancel?.cancel();
         return;
-      case 'aiChooseProvider': {
-        const p = await chooseProvider(this.context.secrets);
-        if (p) this.send({ type: 'aiProvider', label: providerLabel(p) });
-        return;
-      }
+      case 'aiChooseProvider':
+        return vscode.commands.executeCommand('dbDesigner.aiChooseProvider');
+      case 'aiChooseModel':
+        return vscode.commands.executeCommand('dbDesigner.aiChooseModel');
       case 'opsApplied': {
         const done = this.pendingOps.get(m.requestId);
         this.pendingOps.delete(m.requestId);

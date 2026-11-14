@@ -11,7 +11,7 @@ import {
 } from './sources';
 import { ConnectionInfo } from './introspect/index';
 import { ConnectionsView, DiagramsView, SqlFoldersView } from './sidebar';
-import { chooseProvider, clearApiKeys, setApiKey } from './ai/providers';
+import { chooseModel, chooseProvider, clearApiKeys, setApiKey } from './ai/providers';
 import { registerTools } from './ai/tools';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -76,6 +76,7 @@ export function activate(context: vscode.ExtensionContext) {
     p.openAiPanel();
   });
   reg('dbDesigner.aiChooseProvider', () => chooseProvider(context.secrets));
+  reg('dbDesigner.aiChooseModel', () => chooseModel(context.secrets));
   reg('dbDesigner.aiSetApiKey', () => setApiKey(context.secrets));
   reg('dbDesigner.aiClearApiKeys', () => clearApiKeys(context.secrets));
 

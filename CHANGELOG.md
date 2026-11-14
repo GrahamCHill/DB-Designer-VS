@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- **AI model discovery.** Choose from the models available through Groq, other OpenAI-compatible endpoints, Anthropic, Ollama, and VS Code. The extension saves the selected model for future normalisation reviews.
+- **API key management.** Groq and other OpenAI-compatible providers can retry discovery with a replacement key after an authentication failure. Keys entered in DB Designer are encrypted through VS Code Secret Storage.
+
 ## 0.5.0
 
 - **Shape relationship lines by hand.** Select a line to get handles. Slide its segments, add bends and move them (snapped to a grid), or double-click a bend to remove it. **⇄ PK side** / **⇄ FK side** move an end to the other side of its table, and **Reset** returns the line to automatic routing. Line shapes are saved with the diagram, in `.erd.json`, the HTML viewer and image exports.

@@ -2,7 +2,7 @@
   "name": "db-designer-vs",
   "displayName": "DB Designer VS",
   "description": "Database designer for VS Code: interactive, editable ER diagrams from SQL files or a live database (PostgreSQL, SQL Server, MySQL, SQLite). Validated SQL export to PostgreSQL, SQL Server, MySQL or SQLite, table groups, high-res images, shareable diagrams and AI normalisation reviews.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "local",
   "license": "MIT",
   "engines": {

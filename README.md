@@ -58,7 +58,7 @@ For live PostgreSQL connections, Supabase's internal schemas (`auth`, `storage`,
   - a round dot on each bend you added: drag it to move the bend, or double-click it to remove it.
 
   The selected line's label also has **⇄ PK side** / **⇄ FK side**, which attach that end to the other side of its table, and **Reset**, which returns the line to automatic routing. A hand-shaped line keeps its bends when tables move, and its ends stay on their columns. Line shapes are saved with the diagram, in `.erd.json` files, the HTML viewer and image exports.
-- **Auto layout** spaces tables out with wide corridors so routed lines have room. Groups are kept intact and moved as blocks.
+- **Auto layout** spaces tables apart, keeps disconnected sets of tables in separate areas, and expands groups to fit. It switches to routed lines and recalculates their paths, favouring routes with fewer crossings and shared segments. Undo restores previous table positions and hand-shaped lines.
 
 ### Groups
 

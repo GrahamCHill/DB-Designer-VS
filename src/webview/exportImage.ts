@@ -3,8 +3,8 @@
 // rasterised at high resolution.
 
 import { Position as Side, getSmoothStepPath } from '@xyflow/react';
-import { Box, edgeSides, edgeSidesFor } from './edgeGeometry';
-import { Rect, orthogonalThrough, roundedPath, routeOrthogonal } from './router';
+import { Box, edgeSidesFor } from './edgeGeometry';
+import { orthogonalThrough, roundedPath, routeRelationships } from './router';
 import type { GroupBox } from './groups';
 import { EdgeRoute, Relation, Table } from '../shared/model';
 import { HEADER_HEIGHT, NODE_WIDTH, ROW_HEIGHT, nodeHeight } from './layout';
@@ -100,6 +100,34 @@ export function buildSvg(input: SvgInput): { svg: string; width: number; height:
   const { tables, relations, boxes, palette: p, title } = input;
   const PAD = 48;
   const shown = tables.filter((t) => boxes.has(t.id));
+  if (!shown.length) throw new Error('The diagram is empty');
+  const byId = new Map(shown.map((t) => [t.id, t]));
+  const relationships = relations.flatMap((r) => {
+    const parent = byId.get(r.toTable);
+    const child = byId.get(r.fromTable);
+    if (!parent || !child) return [];
+    const pb = boxes.get(parent.id)!;
+    const cb = boxes.get(child.id)!;
+    const fk = r.fromColumns.map((id) => child.columns.find((c) => c.id === id));
+    const childPk = child.columns.filter((c) => c.pk);
+    const oneToOne =
+      (fk.length === 1 && !!fk[0] && (fk[0].unique || (fk[0].pk && childPk.length === 1))) ||
+      (fk.length > 1 && fk.length === childPk.length && fk.every((c) => c?.pk));
+    return r.fromColumns.map((fc, i) => {
+      const id = i === 0 ? r.id : `${r.id}::${i}`;
+      const manual = input.routes?.[id];
+      const geo = edgeSidesFor(parent, pb, r.toColumns[i], child, cb, fc, parent === child, manual);
+      return { id, ...geo, points: manual?.points, oneToOne };
+    });
+  });
+  const obstacles = shown.map((t) => {
+    const b = boxes.get(t.id)!;
+    return { x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h };
+  });
+  const paths = input.routing === false
+    ? new Map(relationships.map(({ id, source, sSide, target, tSide, points }) =>
+      [id, points?.length ? orthogonalThrough(source, sSide, points, target, tSide) : null] as const))
+    : routeRelationships(relationships, obstacles);
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -117,13 +145,19 @@ export function buildSvg(input: SvgInput): { svg: string; width: number; height:
     maxX = Math.max(maxX, g.x + g.w);
     maxY = Math.max(maxY, g.y + g.h);
   }
-  if (!shown.length) throw new Error('The diagram is empty');
+  for (const route of paths.values()) {
+    for (const point of route ?? []) {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+  }
   const titleH = title ? 44 : 0;
   const width = Math.ceil(maxX - minX + PAD * 2);
   const height = Math.ceil(maxY - minY + PAD * 2 + titleH);
   const ox = PAD - minX;
   const oy = PAD + titleH - minY;
-  const byId = new Map(shown.map((t) => [t.id, t]));
   const fkCols = new Set(relations.flatMap((r) => r.fromColumns));
   const rowY = (b: Box, t: Table, colId: string) => b.y + COL_TOP + t.columns.findIndex((c) => c.id === colId) * ROW_HEIGHT + ROW_HEIGHT / 2;
 
@@ -139,11 +173,6 @@ export function buildSvg(input: SvgInput): { svg: string; width: number; height:
   if (title) out.push(`<text x="${PAD}" y="${PAD - 4}" font-size="20" font-weight="600" fill="${p.fg}">${esc(title)}</text>`);
   out.push(`<g transform="translate(${ox} ${oy})">`);
 
-  const obstacles: Rect[] = shown.map((t) => {
-    const b = boxes.get(t.id)!;
-    return { x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h };
-  });
-
   // Groups behind everything, then edges, then tables.
   for (const g of input.groups ?? []) {
     out.push(
@@ -155,52 +184,30 @@ export function buildSvg(input: SvgInput): { svg: string; width: number; height:
   // Edges first so tables sit on top.
   const chips: string[] = [];
   out.push(`<g fill="none" stroke="${p.edge}" stroke-width="1.4">`);
-  for (const r of relations) {
-    const parent = byId.get(r.toTable);
-    const child = byId.get(r.fromTable);
-    if (!parent || !child) continue;
-    const pb = boxes.get(parent.id)!;
-    const cb = boxes.get(child.id)!;
-    const { s, t } = edgeSides(pb, cb, parent.id === child.id);
-    void s;
-    void t;
-    const fk = r.fromColumns.map((id) => child.columns.find((c) => c.id === id));
-    const childPk = child.columns.filter((c) => c.pk);
-    const oneToOne =
-      (fk.length === 1 && !!fk[0] && (fk[0].unique || (fk[0].pk && childPk.length === 1))) ||
-      (fk.length > 1 && fk.length === childPk.length && fk.every((c) => c?.pk));
-    r.fromColumns.forEach((fc, i) => {
-      const tc = r.toColumns[i];
-      const manual = input.routes?.[i === 0 ? r.id : `${r.id}::${i}`];
-      const geo = edgeSidesFor(parent, pb, tc, child, cb, fc, parent.id === child.id, manual);
-      const sx = geo.source.x;
-      const sy = geo.source.y;
-      const tx = geo.target.x;
-      const ty = geo.target.y;
-      const route = manual?.points?.length
-        ? orthogonalThrough(geo.source, geo.sSide, manual.points, geo.target, geo.tSide)
-        : input.routing === false
-          ? null
-          : routeOrthogonal(geo.source, geo.sSide, geo.target, geo.tSide, obstacles);
-      const path = route
-        ? roundedPath(route)
-        : getSmoothStepPath({
-            sourceX: sx,
-            sourceY: sy,
-            sourcePosition: geo.sSide === 'R' ? Side.Right : Side.Left,
-            targetX: tx,
-            targetY: ty,
-            targetPosition: geo.tSide === 'R' ? Side.Right : Side.Left,
-            borderRadius: 10,
-            offset: 28,
-          })[0];
-      const s = geo.sSide;
-      const t = geo.tSide;
-      out.push(`<path d="${path}" marker-start="url(#one)" marker-end="url(#${oneToOne ? 'one' : 'many'})"/>`);
-      const chip = (x: number, y: number, label: string, color: string) =>
-        `<g><rect x="${x - 10}" y="${y - 21}" width="20" height="13" rx="3" fill="${p.bg}" stroke="${color}"/><text x="${x}" y="${y - 11.5}" font-family="${esc(MONO)}" font-size="9" font-weight="700" text-anchor="middle" fill="${color}">${label}</text></g>`;
-      chips.push(chip(s === 'R' ? sx + 24 : sx - 24, sy, 'PK', p.pk), chip(t === 'R' ? tx + 24 : tx - 24, ty, 'FK', p.fk));
-    });
+  for (const geo of relationships) {
+    const sx = geo.source.x;
+    const sy = geo.source.y;
+    const tx = geo.target.x;
+    const ty = geo.target.y;
+    const route = paths.get(geo.id);
+    const path = route
+      ? roundedPath(route)
+      : getSmoothStepPath({
+          sourceX: sx,
+          sourceY: sy,
+          sourcePosition: geo.sSide === 'R' ? Side.Right : Side.Left,
+          targetX: tx,
+          targetY: ty,
+          targetPosition: geo.tSide === 'R' ? Side.Right : Side.Left,
+          borderRadius: 10,
+          offset: 28,
+        })[0];
+    const s = geo.sSide;
+    const t = geo.tSide;
+    out.push(`<path d="${path}" marker-start="url(#one)" marker-end="url(#${geo.oneToOne ? 'one' : 'many'})"/>`);
+    const chip = (x: number, y: number, label: string, color: string) =>
+      `<g><rect x="${x - 10}" y="${y - 21}" width="20" height="13" rx="3" fill="${p.bg}" stroke="${color}"/><text x="${x}" y="${y - 11.5}" font-family="${esc(MONO)}" font-size="9" font-weight="700" text-anchor="middle" fill="${color}">${label}</text></g>`;
+    chips.push(chip(s === 'R' ? sx + 24 : sx - 24, sy, 'PK', p.pk), chip(t === 'R' ? tx + 24 : tx - 24, ty, 'FK', p.fk));
   }
   out.push(`</g>`, ...chips);
 

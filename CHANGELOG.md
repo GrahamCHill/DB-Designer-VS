@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- **Auto layout** gives disconnected sets of tables their own space, lays out tables inside nested groups, and expands groups as needed. Automatic relationship lines route around tables and favour paths with fewer crossings and shared segments.
+
 ## 0.5.1
 
 - **AI model discovery.** Choose from the models available through Groq, other OpenAI-compatible endpoints, Anthropic, Ollama, and VS Code. The extension saves the selected model for future normalisation reviews.

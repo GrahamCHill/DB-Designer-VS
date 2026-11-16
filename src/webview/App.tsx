@@ -42,11 +42,11 @@ import type { Verification } from '../verify/index';
 import { NodeActions, NodeActionsContext, TableNode, TableNodeData, TableNodeType } from './TableNode';
 import { EdgeActionsContext, EdgeMarkers, RelationEdge, RelationEdgeType } from './RelationEdge';
 import { Mutate, TableEditor, addColumnTo, newColumn } from './TableEditor';
-import { NODE_WIDTH, autoLayout, layoutItems, nodeHeight, placeMissing } from './layout';
+import { NODE_WIDTH, layoutDiagram, nodeHeight, placeMissing } from './layout';
 import { GroupActions, GroupActionsContext, GroupNode, GroupNodeData, GroupNodeType } from './GroupNode';
 import { GROUP_COLORS, GroupBox, descendants, groupAt, groupDepth, parentFor, rectAround } from './groups';
 import { RouterContext } from './RelationEdge';
-import type { Rect } from './router';
+import { Pt, Rect, RelationshipPath, routeRelationships } from './router';
 import { DiamondIcon, HashIcon, KeyIcon, LinkIcon, UniqueIcon } from './icons';
 
 declare function acquireVsCodeApi(): { postMessage(m: unknown): void };
@@ -182,7 +182,15 @@ export function App() {
       return true;
     }
   });
-  const [routeSnap, setRouteSnap] = useState<{ rects: Rect[]; version: number }>({ rects: [], version: 0 });
+  const setLineRouting = useCallback((enabled: boolean) => {
+    setRouting(enabled);
+    try {
+      localStorage.setItem('dbd.routing', enabled ? 'on' : 'off');
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+  const [routedPaths, setRoutedPaths] = useState<ReadonlyMap<string, Pt[] | null>>(() => new Map());
   const routeSig = useRef('');
   const [hoverTable, setHoverTable] = useState<string>();
   const [hoverEdge, setHoverEdge] = useState<string>();
@@ -355,10 +363,15 @@ export function App() {
           if (p) pos[t.id] = p;
         }
         const known = Object.keys(pos).length;
-        if (known === 0) Object.assign(pos, autoLayout(m.working.tables, m.working));
+        let loadedGroups = m.groups ?? [];
+        if (known === 0) {
+          const layout = layoutDiagram(m.working.tables, m.working, loadedGroups);
+          Object.assign(pos, layout.positions);
+          loadedGroups = layout.groups;
+        }
         else if (known < m.working.tables.length) Object.assign(pos, placeMissing(m.working.tables, pos));
         posRef.current = pos;
-        setGroups(m.groups ?? []);
+        setGroups(loadedGroups);
         setRoutes(m.edges ?? {});
         if (firstLoad.current) {
           const schemas = new Set(m.working.tables.map((t) => t.schema));
@@ -370,7 +383,7 @@ export function App() {
         if (firstLoad.current) {
           firstLoad.current = false;
           const visible = m.working.tables.filter((t) => !(m.hiddenSchemas ?? []).includes(t.schema));
-          const b = boundsOf(visible.length ? visible : m.working.tables, pos, m.groups ?? []);
+          const b = boundsOf(visible.length ? visible : m.working.tables, pos, loadedGroups);
           setTimeout(() => (b ? rf.fitBounds(b, { padding: 0.05 }) : rf.fitView({ padding: 0.08, maxZoom: 1 })), 80);
         }
       } else if (m.type === 'exported') {
@@ -542,25 +555,6 @@ export function App() {
     });
   }, [visibleTables, fkTargets, highlight, selectedTable, changedCols, allSchemas, groups, editable, schema.tables]);
 
-  // Obstacles for the edge router: table rectangles, refreshed when geometry settles (not mid-drag).
-  useEffect(() => {
-    if (dragging.size) return;
-    const rects: Rect[] = [];
-    for (const n of nodes) {
-      if (!isTable(n)) continue;
-      const w = n.measured?.width ?? NODE_WIDTH;
-      const h = n.measured?.height ?? nodeHeight(n.data.table);
-      rects.push({ x1: Math.round(n.position.x), y1: Math.round(n.position.y), x2: Math.round(n.position.x + w), y2: Math.round(n.position.y + h) });
-    }
-    const sig = rects.map((r) => `${r.x1},${r.y1},${r.x2},${r.y2}`).join(';');
-    if (sig === routeSig.current) return;
-    const t = setTimeout(() => {
-      routeSig.current = sig;
-      setRouteSnap((prev) => ({ rects, version: prev.version + 1 }));
-    }, 60);
-    return () => clearTimeout(t);
-  }, [nodes, dragging]);
-
   // Keep the position cache current.
   useEffect(() => {
     for (const n of nodes) if (isTable(n)) posRef.current[n.id] = n.position;
@@ -622,6 +616,43 @@ export function App() {
     }
     return out;
   }, [nodes, schema.relations, tableById, highlight, selectedEdges, hoverEdge, dragging, routes, editable]);
+
+  // Route all relationships against the same settled geometry and share the corridors.
+  useEffect(() => {
+    if (!routing || dragging.size) return;
+    const timer = setTimeout(() => {
+      const rects: Rect[] = nodes.filter(isTable).map((n) => {
+        const b = boxFor(n.data.table, n.position, n.measured);
+        return { x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h };
+      });
+      const endpoint = (id: string, handleId?: string | null) => {
+        const node = rf.getInternalNode(id);
+        const handle = node?.internals.handleBounds?.source?.find((h) => h.id === handleId);
+        if (!node || !handle) return undefined;
+        const side = handle.position === 'right' ? 'R' : 'L';
+        const p = node.internals.positionAbsolute;
+        return {
+          side,
+          point: { x: Math.round(p.x + handle.x + (side === 'R' ? handle.width : 0)), y: Math.round(p.y + handle.y + handle.height / 2) },
+        } as const;
+      };
+      const relationships: RelationshipPath[] = [];
+      for (const edge of edges) {
+        const source = endpoint(edge.source, edge.sourceHandle);
+        const target = endpoint(edge.target, edge.targetHandle);
+        if (source && target) {
+          relationships.push({
+            id: edge.id, source: source.point, sSide: source.side, target: target.point, tSide: target.side, points: edge.data?.route?.points,
+          });
+        }
+      }
+      const sig = JSON.stringify([rects, relationships]);
+      if (sig === routeSig.current) return;
+      routeSig.current = sig;
+      setRoutedPaths(routeRelationships(relationships, rects));
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [nodes, edges, dragging, rf, routing]);
 
   // ---- React Flow handlers -------------------------------------------------
 
@@ -942,56 +973,18 @@ export function App() {
 
   const runAutoLayout = useCallback(() => {
     record();
-    const gs = groupsRef.current;
-    let pos: Record<string, Position>;
-    let newGroups = gs;
-    if (!gs.length) pos = autoLayout(visibleTables, schemaRef.current);
-    else {
-      // Top-level groups are laid out as single blocks (keeping their inside arrangement); other tables individually.
-      const keyOf = new Map(visibleTables.map((t) => [t.id, tableKey(t)]));
-      const top = gs.filter((g) => !g.parentId || !gs.some((x) => x.id === g.parentId));
-      const blockOf = new Map<string, string>(); // table id -> top group id
-      for (const g of top) {
-        const sub = new Set([g.id, ...descendants(g.id, gs)]);
-        const keys = new Set(gs.filter((x) => sub.has(x.id)).flatMap((x) => x.tables));
-        for (const t of visibleTables) if (keys.has(keyOf.get(t.id)!)) blockOf.set(t.id, g.id);
-      }
-      const items = [
-        ...top.map((g) => ({ id: `grp:${g.id}`, w: g.w, h: g.h })),
-        ...visibleTables.filter((t) => !blockOf.has(t.id)).map((t) => ({ id: t.id, w: NODE_WIDTH, h: nodeHeight(t) })),
-      ];
-      const itemOf = (tableId: string) => (blockOf.has(tableId) ? `grp:${blockOf.get(tableId)}` : tableId);
-      const placed = layoutItems(items, schemaRef.current.relations.map((r) => ({ from: itemOf(r.fromTable), to: itemOf(r.toTable) })));
-      pos = {};
-      const delta = new Map<string, { dx: number; dy: number }>();
-      for (const g of top) {
-        const p = placed[`grp:${g.id}`];
-        if (p) delta.set(g.id, { dx: p.x - g.x, dy: p.y - g.y });
-      }
-      for (const t of visibleTables) {
-        if (blockOf.has(t.id)) {
-          const d = delta.get(blockOf.get(t.id)!);
-          const cur = posRef.current[t.id];
-          if (d && cur) pos[t.id] = { x: cur.x + d.dx, y: cur.y + d.dy };
-        } else if (placed[t.id]) pos[t.id] = placed[t.id];
-      }
-      const topOf = (g: DiagramGroup): string => {
-        let cur = g;
-        while (cur.parentId && gs.some((x) => x.id === cur.parentId)) cur = gs.find((x) => x.id === cur.parentId)!;
-        return cur.id;
-      };
-      newGroups = gs.map((g) => {
-        const d = delta.get(topOf(g));
-        return d ? { ...g, x: g.x + d.dx, y: g.y + d.dy } : g;
-      });
-    }
+    const schema = schemaRef.current;
+    const measured = new Map(nodesRef.current.filter(isTable).map((n) => [n.id, n.measured ?? {}]));
+    const { positions: pos, groups: newGroups } = layoutDiagram(schema.tables, schema, groupsRef.current, measured);
     Object.assign(posRef.current, pos);
     setGroups(newGroups);
+    setRoutes({});
+    setLineRouting(true);
     setNodes((nds) => nds.map((n) => (pos[n.id] ? { ...n, position: pos[n.id] } : n)));
     scheduleSave();
     const b = boundsOf(visibleTables, posRef.current, newGroups);
     setTimeout(() => (b ? rf.fitBounds(b, { padding: 0.05, duration: 300 }) : rf.fitView({ padding: 0.08, maxZoom: 1, duration: 300 })), 50);
-  }, [visibleTables, rf, scheduleSave, setGroups, record]);
+  }, [visibleTables, rf, scheduleSave, setGroups, setRoutes, setLineRouting, record]);
 
   const matches = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1121,7 +1114,7 @@ export function App() {
     <NodeActionsContext.Provider value={nodeActions}>
       <EdgeActionsContext.Provider value={edgeActions}>
       <GroupActionsContext.Provider value={groupActions}>
-      <RouterContext.Provider value={{ rects: routeSnap.rects, version: routeSnap.version, enabled: routing }}>
+      <RouterContext.Provider value={routing ? routedPaths : undefined}>
         <div className={`erd-app ${editable ? '' : 'standalone'} ${exporting ? 'exporting' : ''}`} onClick={() => menu && setMenu(undefined)}>
           <div className="erd-toolbar" onClick={(e) => e.stopPropagation()}>
             <div className="tb-title">
@@ -1186,20 +1179,12 @@ export function App() {
                   </button>
                 </>
               ) : null}
-              <button className="btn" onClick={runAutoLayout} title="Re-arrange tables automatically (groups move as blocks)">
+              <button className="btn" onClick={runAutoLayout} title="Rearrange tables and groups and reroute relationship lines (Undo restores the previous layout)">
                 Auto layout
               </button>
               <button
                 className={`btn ${routing ? 'on' : ''}`}
-                onClick={() => {
-                  const v = !routing;
-                  setRouting(v);
-                  try {
-                    localStorage.setItem('dbd.routing', v ? 'on' : 'off');
-                  } catch {
-                    /* storage unavailable */
-                  }
-                }}
+                onClick={() => setLineRouting(!routing)}
                 title={routing ? 'Lines are routed around tables. Click for direct lines' : 'Route lines around tables'}
               >
                 {routing ? 'Lines: routed' : 'Lines: direct'}

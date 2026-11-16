@@ -1,21 +1,11 @@
-import React, { memo, useContext, useMemo } from 'react';
+import React, { memo, useContext } from 'react';
 import { BaseEdge, Edge, EdgeLabelRenderer, EdgeProps, Position, getSmoothStepPath, useReactFlow } from '@xyflow/react';
 import type { EdgeRoute } from '../shared/model';
 import { CloseIcon } from './icons';
-import { Pt, Rect, Side, midpoint, orthogonalThrough, roundedPath, routeOrthogonal, simplify, snap, toWaypoints } from './router';
+import { Pt, Side, midpoint, orthogonalThrough, roundedPath, simplify, snap, toWaypoints } from './router';
 
-/** Table rectangles the lines should avoid; `version` changes whenever they move. */
-export const RouterContext = React.createContext<{ rects: Rect[]; version: number; enabled: boolean }>({ rects: [], version: 0, enabled: false });
-
-// Routes are cached per edge, endpoints and obstacle version so re-renders (hover, selection) are free.
-const routeCache = new Map<string, Pt[] | null>();
-function cachedRoute(key: string, compute: () => Pt[] | null): Pt[] | null {
-  if (routeCache.has(key)) return routeCache.get(key)!;
-  if (routeCache.size > 5000) routeCache.clear();
-  const r = compute();
-  routeCache.set(key, r);
-  return r;
-}
+/** Automatic routes computed together after table geometry settles. */
+export const RouterContext = React.createContext<ReadonlyMap<string, Pt[] | null> | undefined>(undefined);
 
 export interface RelationEdgeData extends Record<string, unknown> {
   /** e.g. "contracts.pdf_file_id → files.id" */
@@ -86,13 +76,10 @@ function RelationEdgeImpl({ id, sourceX, sourceY, targetX, targetY, sourcePositi
   const sSide = sideOf(sourcePosition);
   const tSide = sideOf(targetPosition);
   const manual = data?.route?.points?.length ? data.route.points : undefined;
-  const useRoute = !manual && router.enabled && !data?.moving && horizontal;
-  const auto = useMemo(() => {
-    if (!useRoute) return null;
-    const key = `${id}|${router.version}|${s.x},${s.y},${t.x},${t.y}|${sourcePosition}${targetPosition}`;
-    return cachedRoute(key, () => routeOrthogonal(s, sSide, t, tSide, router.rects));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [useRoute, id, router.version, router.rects, s.x, s.y, t.x, t.y, sourcePosition, targetPosition]);
+  const pending = !manual && !data?.moving && horizontal ? router?.get(id) : undefined;
+  const first = pending?.[0];
+  const last = pending?.at(-1);
+  const auto = first?.x === s.x && first.y === s.y && last?.x === t.x && last.y === t.y ? pending : undefined;
   const route = manual && horizontal ? orthogonalThrough(s, sSide, manual, t, tSide) : auto;
   const [stepPath, stepX, stepY] = getSmoothStepPath({
     sourceX,
